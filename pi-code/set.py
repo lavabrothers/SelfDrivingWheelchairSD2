@@ -7,8 +7,8 @@ mcp = adafruit_mcp4728.MCP4728(i2c)
 
 # Use normalized_value which is easier to work with (0.0 to 1.0)
 # This sets Channel A to its maximum voltage
-mcp.channel_a.normalized_value = 0.6
-mcp.channel_b.normalized_value = 0.4
+mcp.channel_a.normalized_value = 0.5
+mcp.channel_b.normalized_value = 0.5
 mcp.channel_c.normalized_value = 0.5
 mcp.channel_d.normalized_value = 0.5
 
