@@ -43,7 +43,7 @@ RAMP_DELAY = 0.05
 
 # --- Optimization for Raspberry Pi ---
 # You MUST keep this number high to prevent crashes.
-PROCESS_EVERY_NTH_FRAME = 10
+PROCESS_EVERY_NTH_FRAME = 1
 
 # --- Constants for Green Tracking Mode ---
 LOWER_GREEN = np.array([35, 100, 100])
