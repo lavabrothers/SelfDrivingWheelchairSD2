@@ -82,8 +82,8 @@ def set_movement(fwd_bwd, left_right):
     left_right = max(-1.0, min(1.0, left_right))
     mcp.channel_a.normalized_value = 0.5 + (fwd_bwd / 2.0)
     mcp.channel_b.normalized_value = 0.5 - (fwd_bwd / 2.0)
-    mcp.channel_c.normalized_value = 0.5 + (left_right / 2.0)
-    mcp.channel_d.normalized_value = 0.5 - (left_right / 2.0)
+    mcp.channel_c.normalized_value = 0.5 - (left_right / 2.0)
+    mcp.channel_d.normalized_value = 0.5 + (left_right / 2.0)
     current_fwd_bwd = fwd_bwd
     current_left_right = left_right
 
