@@ -7,7 +7,7 @@ import adafruit_mpu6050
 i2c = board.I2C()  # uses board.SCL and board.SDA
 
 # Create an MPU6050 sensor object
-mpu = adafruit_mpu6050.MPU6050(i2c)
+mpu = adafruit_mpu6050.MPU6050(i2c, address=0x68)
 
 print("Reading MPU6050 data...")
 

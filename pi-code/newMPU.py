@@ -54,7 +54,7 @@ def main(stdscr):
             bus=1,
             gfs=GFS_1000,
             afs=AFS_8G,
-            mode=AK8963_MODE_C1aaaaa00HZ
+            mode=AK8963_MODE_C100HZ
         )
         stdscr.addstr(4, 0, "Calibrating sensor... Please keep it still.")
         stdscr.refresh()
