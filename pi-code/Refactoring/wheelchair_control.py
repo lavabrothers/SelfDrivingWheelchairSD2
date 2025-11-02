@@ -80,6 +80,33 @@ def set_rotation(speed):
     print(f"Command: Rotate ({speed:.2f}) -> Right(C): {val_c:.2f}, Left(D): {val_d:.2f}")
     _update_dac_channels()
 
+def set_joystick_values(fwd, back, left, right):
+    """
+    Sets the DAC values based on raw joystick inputs (0.0-1.0).
+    """
+    global val_a, val_b, val_c, val_d
+    val_a = fwd
+    val_b = back
+    val_c = right
+    val_d = left
+    _update_dac_channels()
+
+def set_movement(fwd_bwd, left_right):
+    """
+    Sets movement based on a centered range (-1.0 to 1.0).
+    fwd_bwd: -1.0 (full back) to 1.0 (full fwd)
+    left_right: -1.0 (full left) to 1.0 (full right)
+    """
+    global val_a, val_b, val_c, val_d
+    fwd_bwd = max(-1.0, min(1.0, fwd_bwd))
+    left_right = max(-1.0, min(1.0, left_right))
+    val_a = 0.5 + (fwd_bwd / 2.0)
+    val_b = 0.5 - (fwd_bwd / 2.0)
+    val_c = 0.5 + (left_right / 2.0)
+    val_d = 0.5 - (left_right / 2.0)
+    _update_dac_channels()
+
+
 if __name__ == "__main__":
     # A simple test to run if you execute this file directly
     import time

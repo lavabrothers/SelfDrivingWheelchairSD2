@@ -1,211 +1,183 @@
 # File: imu_sensor.py
 """
-This module provides a tilt-compensated compass heading from an
-MPU-9250 IMU by talking directly to the sensor's I2C registers
-using the 'smbus2' library.
+Module to interface with the MPU-9250 IMU using the 'mpu9250-jmdev' library.
 
-This avoids problematic high-level libraries that fail to install.
-
---- CRITICAL SETUP ---
-
-1.  INSTALL THE LIBRARY:
-    pip install smbus2
-
-2.  ENABLE I2C ON YOUR RASPBERRY PI:
-    Use 'sudo raspi-config' -> Interface Options -> I2C -> Enable.
-
---- ! WARNING: NO CALIBRATION ! ---
-
-This low-level script does NOT include a calibration step.
-The magnetometer readings will be "raw" and highly sensitive
-to magnetic interference from the wheelchair's motors or
-any nearby metal.
-
-For a final project, a manual calibration routine would
-be needed, but this script WILL run and give you a
-tilt-compensated heading.
+FINAL CORRECTED VERSION:
+This version fixes the method naming conventions (uses camelCase) and
+the correct register constant (MPU9050_ADDRESS_68) based on the user's
+working example script.
 """
-import smbus2
-import math
+
 import time
+import math
+import sys
+from mpu9250_jmdev.registers import *
+from mpu9250_jmdev.mpu_9250 import MPU9250
 
-# --- Global variables ---
-bus = None
-# Store the last known heading to return on a failed read
-last_known_heading = 0.0
+# --- Configuration ---
+# You must run calibration (python3 imu_sensor.py) to get good readings.
+# After calibration, find your local magnetic declination and enter it here.
+# Find it at: https://www.magnetic-declination.com/
+# Example: University Park, FL is -7.11 degrees (Updated for 2025)
+MAGNETIC_DECLINATION = -7.11 
 
-# Smoothing factor for the low-pass filter (0.0 - 1.0)
-# Lower values = smoother but more "laggy"
-# Higher values = more responsive but "twitchier"
-SMOOTHING_FACTOR = 1
+# Smoothing factor (0.0 = no smoothing, 0.9 = very heavy smoothing)
+SMOOTHING_ALPHA = 0.7 # 0.0 = raw, 0.9 = very smooth
 
-# MPU9250 Registers
-MPU9250_ADDR = 0x68
-PWR_MGMT_1   = 0x6B
-INT_PIN_CFG  = 0x37
-ACCEL_XOUT_H = 0x3B
-
-# AK8963 Magnetometer Registers
-AK8963_ADDR  = 0x0C
-AK8963_CNTL  = 0x0A
-AK8963_ST1   = 0x02
-AK8963_HXL   = 0x03
-AK8963_ST2   = 0x09
-
-def _read_word_2c(addr, reg_start):
-    """Reads two 8-bit bytes and combines them into one 16-bit signed value."""
-    high = bus.read_byte_data(addr, reg_start)
-    low  = bus.read_byte_data(addr, reg_start + 1)
-    val = (high << 8) + low
-    
-    if (val >= 0x8000):
-        return -((65535 - val) + 1)
-    else:
-        return val
-
-def _read_mag_word_le(addr, reg_start):
-    """Reads two 8-bit bytes (little-endian) for the magnetometer."""
-    low  = bus.read_byte_data(addr, reg_start)
-    high = bus.read_byte_data(addr, reg_start + 1)
-    val = (high << 8) + low
-    
-    if (val >= 0x8000):
-        return -((65535 - val) + 1)
-    else:
-        return val
+# --- Global Variables ---
+mpu = None
+last_smoothed_heading = None
 
 def initialize_imu():
     """
-    Initializes the connection to the IMU using smbus2.
+    Initializes the MPU-9250 sensor using the mpu9250-jmdev library.
+    Returns True on success, False on failure.
     """
-    global bus
-    
-    print("Initializing IMU (smbus2 direct access)...")
-    
+    global mpu
     try:
-        # Assumes I2C bus 1
-        bus = smbus2.SMBus(1)
+        print("Initializing MPU-9250...")
+        mpu = MPU9250(
+            address_ak=AK8963_ADDRESS,
+            # --- CORRECTED CONSTANT ---
+            address_mpu_master=MPU9050_ADDRESS_68, 
+            address_mpu_slave=None,
+            bus=1,
+            gfs=GFS_1000,
+            afs=AFS_8G,
+            mfs=AK8963_BIT_16,
+            mode=AK8963_MODE_C100HZ
+        )
         
-        # 1. Wake up MPU-9250
-        bus.write_byte_data(MPU9250_ADDR, PWR_MGMT_1, 0x00)
-        time.sleep(0.1)
+        # Configure the MPU-9250
+        mpu.configure() 
         
-        # 2. Enable I2C Bypass mode to talk to magnetometer
-        bus.write_byte_data(MPU9250_ADDR, INT_PIN_CFG, 0x02)
-        time.sleep(0.1)
-        
-        # 3. Configure Magnetometer (AK8963)
-        #    Set to 16-bit output, 100Hz continuous mode 2
-        bus.write_byte_data(AK8963_ADDR, AK8963_CNTL, 0x16)
-        time.sleep(0.1)
+        # Load calibration data if it exists
+        try:
+            # --- CORRECTED METHOD NAME (camelCase) ---
+            mpu.loadCalibration()
+            print("Loaded existing calibration data.")
+        except FileNotFoundError:
+            print_calibration_warning()
+        except AttributeError:
+            print_calibration_warning() # Also catch if method doesn't exist
+            
+        print("MPU-9250 Initialized Successfully.")
+        return True
         
     except Exception as e:
-        print("Error: Could not initialize MPU9250 on I2C bus 1.")
-        print("Please ensure the sensor is connected and I2C is enabled.")
-        print(f"Details: {e}")
+        print(f"Error initializing MPU-9250: {e}")
+        print("Please check I2C connection and bus number (bus=1).")
         return False
 
-    print("IMU is stable and providing data.")
-    return True
+def print_calibration_warning():
+    """Prints a warning message about needing calibration."""
+    print("="*50)
+    print("WARNING: MPU-9250 CALIBRATION FILE NOT FOUND.")
+    print("Magnetometer data will be inaccurate!")
+    print("Please run this script directly to calibrate:")
+    print("  python3 imu_sensor.py")
+    print("="*50)
 
-def get_heading():
+def get_current_heading():
     """
-    Gets the current tilt-compensated compass heading.
-    
-    Returns:
-        (float): A compass heading from 0.0 to 359.9 degrees.
-                 Returns the last known good heading on a read failure.
+    Reads the sensors, calculates a tilt-compensated heading, and smooths it.
+    Returns the heading in degrees (0-360).
     """
-    global last_known_heading, bus
+    global mpu, last_smoothed_heading
     
-    if bus is None:
+    if mpu is None:
         print("Error: IMU not initialized.")
-        return 0.0  # Return 0 if not ready
+        return 0.0
 
     try:
-        # 1. Read Accelerometer
-        # Read raw 16-bit values
-        ax_raw = _read_word_2c(MPU9250_ADDR, ACCEL_XOUT_H)
-        ay_raw = _read_word_2c(MPU9250_ADDR, ACCEL_XOUT_H + 2)
-        az_raw = _read_word_2c(MPU9250_ADDR, ACCEL_XOUT_H + 4)
+        # 1. Read sensor data
+        # --- CORRECTED METHOD NAMES (camelCase) ---
+        accel_data = mpu.readAccelerometerMaster()
+        mag_data = mpu.readMagnetometerMaster()
         
-        # Normalize to G's (default scale is +/- 2g)
-        ax = ax_raw / 16384.0
-        ay = ay_raw / 16384.0
-        
-        # 2. Read Magnetometer
-        # Check if data is ready
-        status = bus.read_byte_data(AK8963_ADDR, AK8963_ST1)
-        if not (status & 0x01):
-            return last_known_heading # Data not ready, return old value
-            
-        # Read raw 16-bit values (little-endian)
-        mx = _read_mag_word_le(AK8963_ADDR, AK8963_HXL)
-        my = _read_mag_word_le(AK8963_ADDR, AK8963_HXL + 2)
-        mz = _read_mag_word_le(AK8963_ADDR, AK8963_HXL + 4)
-        
-        # Read ST2 register to mark data as read
-        bus.read_byte_data(AK8963_ADDR, AK8963_ST2)
+        ax, ay, az = accel_data[0], accel_data[1], accel_data[2]
+        mx, my, mz = mag_data[0], mag_data[1], mag_data[2]
 
-        # 3. Calculate roll and pitch from accelerometer
+        # 2. Calculate Tilt Compensation
+        roll = math.atan2(ay, az)
+        pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az))
         
-        # Clamp ax to avoid math domain errors
-        if ax > 1.0:  ax = 1.0
-        if ax < -1.0: ax = -1.0
-        
-        pitch = math.asin(-ax)
-        
-        # Clamp ay/cos(pitch) to avoid math domain errors
-        cos_pitch = math.cos(pitch)
-        if cos_pitch == 0: cos_pitch = 0.0001 # Avoid divide by zero
-        roll_arg = ay / cos_pitch
-        if roll_arg > 1.0:  roll_arg = 1.0
-        if roll_arg < -1.0: roll_arg = -1.0
-        
-        roll = math.asin(roll_arg)
-        
-        # 4. Apply tilt compensation to magnetometer data
+        # Compensate magnetometer readings
         mag_x_comp = mx * math.cos(pitch) + mz * math.sin(pitch)
-        mag_y_comp = mx * math.sin(roll) * math.sin(pitch) + \
-                     my * math.cos(roll) - \
-                     mz * math.sin(roll) * math.cos(pitch)
+        mag_y_comp = (mx * math.sin(roll) * math.sin(pitch) + 
+                      my * math.cos(roll) - 
+                      mz * math.sin(roll) * math.cos(pitch))
         
-        # 5. Calculate heading
-        heading = 180 * math.atan2(mag_y_comp, mag_x_comp) / math.pi
+        # 3. Calculate Heading
+        heading_rad = math.atan2(mag_y_comp, mag_x_comp)
         
-        # Convert to 0-360
-        heading = (heading + 360) % 360
-        
-        # --- NEW: Apply smoothing filter ---
-        # This handles the 360/0 degree "wraparound"
-        angle_diff = heading - last_known_heading
-        if angle_diff > 180:
-            angle_diff -= 360
-        elif angle_diff < -180:
-            angle_diff += 360
+        # Convert to degrees, apply declination, and normalize
+        heading_deg = math.degrees(heading_rad)
+        heading_deg += MAGNETIC_DECLINATION
+        heading_deg = heading_deg % 360
             
-        smoothed_heading = (last_known_heading + angle_diff * SMOOTHING_FACTOR) % 360
-        
-        last_known_heading = smoothed_heading
-        return smoothed_heading
+        # 4. Apply Smoothing (Exponential Moving Average)
+        if last_smoothed_heading is None:
+            last_smoothed_heading = heading_deg
+        else:
+            diff = heading_deg - last_smoothed_heading
+            if diff > 180:
+                diff -= 360
+            elif diff < -180:
+                diff += 360
+                
+            new_heading = (last_smoothed_heading * SMOOTHING_ALPHA) + (heading_deg * (1.0 - SMOOTHING_ALPHA))
+            last_smoothed_heading = new_heading % 360
+
+        return last_smoothed_heading
 
     except Exception as e:
-        # On any read error (e.g., I2C disconnect), return last value
-        print(f"IMU read error: {e}. Returning last known heading.")
-        return last_known_heading
+        print(f"Error reading IMU: {e}")
+        return last_smoothed_heading if last_smoothed_heading is not None else 0.0
 
+# --- CALIBRATION ROUTINE ---
 if __name__ == "__main__":
-    # A simple test to run if you execute this file directly
-    if initialize_imu():
-        print("IMU Test Started. Press Ctrl+C to stop.")
-        print("Rotate the sensor to see the heading change.")
-        try:
-            while True:
-                heading = get_heading()
-                print(f"Current Compass Heading: {heading: >7.2f} degrees", end="\r")
-                time.sleep(0.05) # Poll at 20Hz
-                
-        except KeyboardInterrupt:
-            print("\nStopping IMU test.")
-    else:
-        print("Could not initialize IMU. Exiting.")
+    
+    print("Running MPU-9250 Test & Calibration...")
+    
+    if not initialize_imu():
+        print("Initialization failed. Exiting.")
+        sys.exit(1)
+        
+    print("\n--- Sensor Test (Press Ctrl+C to stop test) ---")
+    try:
+        while True:
+            heading = get_current_heading()
+            print(f"Current Tilt-Compensated Heading: {heading: >7.2f} degrees", end="\r")
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\n\nSensor test finished.")
+        pass # Continue to calibration
+    
+    print("\n--- MPU-9250 CALIBRATION ---")
+    print("This will calibrate the magnetometer.")
+    print("The library will save calibration data to 'calib.json'.")
+    try:
+        input("Press Enter to begin magnetometer calibration (move sensor in figure-8)...")
+        # --- CORRECTED METHOD NAME (camelCase) ---
+        mpu.calibrateMagnetometer() 
+        print("\n--- Magnetometer Calibration Complete! ---")
+        
+        input("Press Enter to test gyroscope calibration (keep sensor still)...")
+        # --- CORRECTED METHOD NAME (camelCase) ---
+        mpu.calibrateGyroscope()
+        print("\n--- Gyroscope Calibration Complete! ---")
+        
+        print("\nCalibration data has been saved.")
+        print("You can now run your main controller scripts.")
+        
+    except AttributeError:
+        print("\n--- CALIBRATION FAILED ---")
+        print("Your version of the 'mpu9250-jmdev' library")
+        print("does not seem to have the .calibrate...() methods.")
+        print("Please find the 'mag_cal.py' script from the library")
+        print("and run it manually to generate 'calib.json'.")
+    except Exception as e:
+        print(f"\nCalibration failed: {e}")
+    except KeyboardInterrupt:
+        print("\nCalibration cancelled by user.")
