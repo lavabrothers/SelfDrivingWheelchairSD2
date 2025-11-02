@@ -26,10 +26,10 @@ try:
     print("Initializing I2C and sensors...")
     i2c = board.I2C()
     mcp = adafruit_mcp4728.MCP4728(i2c)
-    print("MCP4728 found and initialized. ✅")
 except ValueError as e:
     print(f"Error: Could not find a required I2C device. Please check connections.")
     print(f"Details: {e}")
+    print("MCP4728 found and initialized. ✅")
     exit()
 
 try:

@@ -7,7 +7,7 @@ import numpy as np
 import open3d as o3d
 
 # --- Configuration ---
-RAW_DATA_FILENAME = "raw_scan_data.csv"
+RAW_DATA_FILENAME = "raw_scan_data_20251101_213006.csv"
 OUTPUT_PCD_FILENAME = "point_cloud.pcd"
 SCAN_RANGE_FEET = 15.0
 VERTICAL_PIXEL_STEP = 10 # Process every 10th pixel to keep point cloud manageable
