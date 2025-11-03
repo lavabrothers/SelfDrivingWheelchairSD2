@@ -1,3 +1,11 @@
+# File: view_map.py
+"""
+This script loads and displays a 3D point cloud from a .pcd file.
+
+It uses Matplotlib for visualization to ensure compatibility with systems 
+that may lack full graphical desktop environments (like a Raspberry Pi).
+"""
+
 import open3d as o3d
 import os
 import numpy as np
@@ -5,10 +13,9 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 # --- Path Configuration ---
-# We construct an absolute path to the PCD file based on the script's location.
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 PCD_FILENAME = os.path.join(SCRIPT_DIR, "point_cloud_3d.pcd")
-MAX_POINTS_TO_DISPLAY = 30000 # Limit points to prevent performance issues
+MAX_POINTS_TO_DISPLAY = 30000  # Limit points to prevent performance issues
 
 def view_pcd_with_matplotlib(filename):
     """
@@ -46,6 +53,7 @@ def view_pcd_with_matplotlib(filename):
         z = points_to_display[:, 2]
 
         # Scatter plot. Color points by height (y-coordinate)
+        # We plot (x, z, y) to get a more natural top-down perspective.
         ax.scatter(x, z, y, s=1, c=y, cmap='viridis_r')
 
         ax.set_xlabel("X (meters)")
@@ -53,7 +61,7 @@ def view_pcd_with_matplotlib(filename):
         ax.set_zlabel("Y / Height (meters)")
         ax.set_title("3D Point Cloud Map")
         
-        # Set aspect ratio to be equal
+        # Set aspect ratio to be equal for a more accurate representation
         max_range = np.array([x.max()-x.min(), y.max()-y.min(), z.max()-z.min()]).max()
         mid_x = (x.max()+x.min()) * 0.5
         mid_y = (y.max()+y.min()) * 0.5
@@ -61,7 +69,6 @@ def view_pcd_with_matplotlib(filename):
         ax.set_xlim(mid_x - max_range * 0.5, mid_x + max_range * 0.5)
         ax.set_ylim(mid_z - max_range * 0.5, mid_z + max_range * 0.5)
         ax.set_zlim(mid_y - max_range * 0.5, mid_y + max_range * 0.5)
-
 
         print("Displaying plot. Close the plot window to exit.")
         plt.show()

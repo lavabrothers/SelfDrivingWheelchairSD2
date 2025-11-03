@@ -7,7 +7,7 @@ import kinectcloseobject as kinect
 
 # --- Constants ---
 ADC_MAX = 4095.0  # ESP32's ADC is 12-bit
-CRUISE_STOP_DISTANCE_MM = 1000  # 1 meter
+CRUISE_STOP_DISTANCE_MM = 1500  # 1 meter
 CRUISE_SPEED = 0.3 # 30% speed
 
 # --- State Management ---
@@ -28,12 +28,14 @@ def handle_incoming_data(data: bytes):
     message = data.decode().strip()
     last_command_time = time.time()
 
-    if message == "CruiseControl":
+    if message == "Cruise":
         if current_state != ControlState.CRUISE:
             print("Switching to CRUISE mode.")
             current_state = ControlState.CRUISE
             wc.stop()
-    elif message == "Stop":
+    elif message == "Follow":
+        print("FOLLOW RECIEVED")
+    elif message == "STOP":
         if current_state != ControlState.STOPPED:
             print("Switching to STOPPED mode.")
             current_state = ControlState.STOPPED
@@ -74,7 +76,7 @@ async def cruise_control_loop():
 
 async def main():
     """Main asynchronous function for the wheelchair control flow."""
-    global last_command_time
+    global last_command_time, current_state
     
     # --- Initialization ---
     if not wc.initialize_dac():

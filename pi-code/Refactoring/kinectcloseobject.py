@@ -21,11 +21,16 @@ KINECT_WIDTH = 512  # Depth map width (512 pixels)
 # Smoothing / Damping factor
 # 1.0 = no smoothing (raw data)
 # 0.1 = very heavy smoothing (slow to react)
-SMOOTHING_FACTOR = 0.01
+SMOOTHING_FACTOR = 0.9
 
 # Ratio of the frame to crop from the bottom (e.g., 0.25 = 25%)
 # This is used to ignore the floor.
 CROP_BOTTOM_RATIO = 0.05
+
+# Ratios to crop from the left and right (e.g., 0.2 = 20% from each side)
+# This is used to narrow the horizontal field of view.
+CROP_LEFT_RATIO = 0.2
+CROP_RIGHT_RATIO = 0.2
 
 # --- Global variables for the device ---
 freenect2 = None
@@ -123,9 +128,16 @@ def get_nearest_object_angle(depth_frame_obj=None):
         # --- CROP THE BOTTOM OF THE FRAME TO IGNORE FLOOR ---
         height = depth_map.shape[0] # Should be 424
         # Calculate the row index to crop *at*. (e.g., 424 * (1.0 - 0.25) = 318)
-        crop_row = int(height * (1.0 - CROP_BOTTOM_RATIO))
+        crop_row_bottom = int(height * (1.0 - CROP_BOTTOM_RATIO))
+        
+        # Calculate column indices for horizontal cropping
+        width = depth_map.shape[1] # Should be 512
+        crop_col_left = int(width * CROP_LEFT_RATIO)
+        crop_col_right = int(width * (1.0 - CROP_RIGHT_RATIO))
+
         # Create the Region of Interest (ROI) by slicing
-        depth_map_roi = depth_map[0:crop_row, :]
+        # Apply both vertical (bottom) and horizontal (left/right) cropping
+        depth_map_roi = depth_map[0:crop_row_bottom, crop_col_left:crop_col_right]
         # --- END CROP ---
         
         # --- Use the ROI for all calculations ---
@@ -140,10 +152,15 @@ def get_nearest_object_angle(depth_frame_obj=None):
         # Search for the minimum in the ROI
         search_map = np.where(depth_map_roi == 0, 999999, depth_map_roi)
         # y, x coords will be relative to the ROI
-        y, x = np.unravel_index(np.argmin(search_map), search_map.shape)
+        y_roi, x_roi = np.unravel_index(np.argmin(search_map), search_map.shape)
 
-        # Angle calculation is unaffected since we didn't crop width
-        normalized_x = (x - (KINECT_WIDTH / 2.0)) / (KINECT_WIDTH / 2.0)
+        # Convert ROI coordinates back to full frame coordinates for angle calculation
+        x_full_frame = x_roi + crop_col_left
+        y_full_frame = y_roi # y_roi is already relative to the top of the frame, not the cropped bottom
+
+        # Angle calculation now uses the full frame width for normalization,
+        # but the detected point is within the cropped horizontal region.
+        normalized_x = (x_full_frame - (KINECT_WIDTH / 2.0)) / (KINECT_WIDTH / 2.0)
         new_angle = normalized_x * (KINECT_H_FOV / 2.0)
         
         # Apply smoothing
@@ -159,7 +176,7 @@ def get_nearest_object_angle(depth_frame_obj=None):
         # Store coords and return all values
         # The (x, y) coords are correct for visualization, as 'y'
         # will be in the non-cropped section of the frame.
-        last_known_coords = (x, y)
+        last_known_coords = (x_full_frame, y_full_frame)
         return last_known_depth, last_known_angle, last_known_coords
 
     except Exception as e:
@@ -188,6 +205,7 @@ if __name__ == "__main__":
     if initialize_kinect():
         print("Testing Kinect V2. Point it at something.")
         print(f"Ignoring bottom {CROP_BOTTOM_RATIO*100:.0f}% of the view (floor).")
+        print(f"Ignoring left {CROP_LEFT_RATIO*100:.0f}% and right {CROP_RIGHT_RATIO*100:.0f}% of the view (sides).")
         print("Press 'q' in the window to stop.")
         
         try:
@@ -220,24 +238,41 @@ if __name__ == "__main__":
                 # 6. Convert to color to draw on it
                 image_color = cv2.cvtColor(depth_viz, cv2.COLOR_GRAY2BGR)
 
-                # 7. Draw the crop line for visualization
+                # 7. Draw the crop lines for visualization
                 viz_height = image_color.shape[0]
-                crop_row_viz = int(viz_height * (1.0 - CROP_BOTTOM_RATIO))
+                viz_width = image_color.shape[1]
+
+                crop_row_bottom_viz = int(viz_height * (1.0 - CROP_BOTTOM_RATIO))
+                crop_col_left_viz = int(viz_width * CROP_LEFT_RATIO)
+                crop_col_right_viz = int(viz_width * (1.0 - CROP_RIGHT_RATIO))
                 
-                # Draw a line to show the cutoff
-                cv2.line(image_color, (0, crop_row_viz), (KINECT_WIDTH - 1, crop_row_viz), 
+                # Draw a line to show the bottom cutoff
+                cv2.line(image_color, (0, crop_row_bottom_viz), (viz_width - 1, crop_row_bottom_viz), 
                          (255, 255, 0), 1) # Cyan line
                 
-                # Add text label for the ignored area
+                # Draw lines to show the left and right cutoffs
+                cv2.line(image_color, (crop_col_left_viz, 0), (crop_col_left_viz, viz_height - 1),
+                         (255, 255, 0), 1) # Cyan line
+                cv2.line(image_color, (crop_col_right_viz, 0), (crop_col_right_viz, viz_height - 1),
+                         (255, 255, 0), 1) # Cyan line
+                
+                # Add text label for the ignored areas
                 cv2.putText(image_color, "IGNORING THIS AREA (FLOOR)", 
-                            (10, crop_row_viz + 20), 
+                            (10, crop_row_bottom_viz + 20), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                cv2.putText(image_color, "IGNORING SIDES", 
+                            (crop_col_left_viz + 5, 20), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                cv2.putText(image_color, "IGNORING SIDES", 
+                            (crop_col_right_viz - 150, 20), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
 
                 # 8. Draw the circle and text if an object was found
                 if coords is not None and depth is not None:
                     x, y = coords
-                    # Check if coords are valid (should always be within crop)
-                    if y < crop_row_viz:
+                    # Check if coords are valid (should be within the new cropped area)
+                    if y < crop_row_bottom_viz and x > crop_col_left_viz and x < crop_col_right_viz:
                         cv2.circle(image_color, (x, y), 10, (0, 0, 255), 2) # Red circle
                         
                         text = f"{depth/1000.0:.2f} m, {angle:.1f} deg"

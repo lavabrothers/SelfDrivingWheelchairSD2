@@ -1,120 +1,114 @@
+# File: process_pointcloud.py
+"""
+This script reads a raw_scan_data_*.csv file, which contains rotational angles and
+corresponding vertical depth slices, and converts this data into a 3D point cloud.
+
+This is modeled after the original 'processmap.py'.
+"""
+
 import csv
 import numpy as np
-from PIL import Image
 import glob
 import os
+import math
 import open3d as o3d
 
 # --- Configuration ---
-MAP_RESOLUTION_MM_PER_PIXEL = 50  # Each pixel represents a 5cm x 5cm area
-OUTPUT_IMAGE_FILENAME = "map.png"
 OUTPUT_PCD_FILENAME = "point_cloud_3d.pcd"
+SCAN_RANGE_METERS = 8.0
+VERTICAL_PIXEL_STEP = 10  # Process every 10th pixel to keep point cloud manageable
+
+# --- Kinect V2 Depth Camera Intrinsics (from processmap.py) ---
+# These are typical values, but may not be perfectly calibrated for every device.
+FX_DEPTH = 365.481
+FY_DEPTH = 365.481
+CX_DEPTH = 257.346  # Horizontal center of the sensor (image width is 512)
+CY_DEPTH = 210.347  # Vertical center of the sensor (image height is 424)
+
 # --- Path Configuration ---
-# The script is in 'pi-code/Refactoring', and the CSV files are in 'pi-code'.
-# We construct a path that goes one level up from the script's directory.
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-POINT_CLOUD_DIR = os.path.join(SCRIPT_DIR, "..")
+RAW_DATA_DIR = os.path.join(SCRIPT_DIR, "..") # CSV files are in the parent 'pi-code' directory
 
-
-def find_latest_point_cloud_file(directory):
-    """Finds the most recent point_cloud_map_*.csv file in the specified directory."""
-    search_pattern = os.path.join(directory, 'point_cloud_map_*.csv')
+def find_latest_raw_scan_file(directory):
+    """Finds the most recent raw_scan_data_*.csv file."""
+    search_pattern = os.path.join(directory, 'raw_scan_data_*.csv')
     files = glob.glob(search_pattern)
     if not files:
         return None
-    latest_file = max(files, key=os.path.getctime)
-    return latest_file
+    return max(files, key=os.path.getctime)
 
 def save_points_to_pcd(points, filename):
     """Saves a list of 3D points to a .pcd file."""
     if not points:
-        print("No points to save to PCD.")
+        print("No points to save.")
         return
-    
-    # Convert points from mm to meters for standard PCD format
-    points_in_meters = np.array(points) / 1000.0
-    
-    print(f"\nSaving {len(points_in_meters)} points to '{filename}'...")
+    print(f"\nSaving {len(points)} points to '{filename}'...")
     pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points_in_meters)
+    pcd.points = o3d.utility.Vector3dVector(np.asarray(points))
     o3d.io.write_point_cloud(filename, pcd)
-    print(f"✅ Point cloud successfully saved to '{filename}'.")
+    print("✅ Point cloud successfully saved.")
 
-
-def process_point_cloud(filename):
+def process_raw_data(filename):
     """
-    Reads a point cloud CSV, converts it to a 2D grid map (PNG), 
-    and saves the raw points as a PCD file.
+    Reads the raw data file line by line and converts it to a 3D point cloud.
     """
-    print(f"Reading point cloud data from '{filename}'...")
-    points = []
+    print(f"Reading raw data from '{filename}'...")
+    world_points = []
+    
     try:
         with open(filename, 'r') as f:
-            csv_reader = csv.DictReader(f)
-            for row in csv_reader:
-                try:
-                    # Now reading x, y (height), and z coordinates
-                    points.append((
-                        float(row['world_x_mm']), 
-                        float(row['world_y_mm']), 
-                        float(row['world_z_mm'])
-                    ))
-                except (ValueError, KeyError) as e:
-                    print(f"Skipping row due to error: {e} - Row: {row}")
-                    continue
+            csv_reader = csv.reader(f)
+            for i, row in enumerate(csv_reader):
+                if not row: continue # Skip empty rows
+                
+                current_angle_deg = float(row[0])
+                current_angle_rad = math.radians(current_angle_deg)
+                depth_slice_str = row[1:]
+                
+                # Process the vertical slice of depth data
+                for v_raw, depth_str in enumerate(depth_slice_str[::VERTICAL_PIXEL_STEP]):
+                    depth_mm = float(depth_str)
+                    
+                    if depth_mm == 0 or depth_mm > (SCAN_RANGE_METERS * 1000):
+                        continue
+
+                    v = v_raw * VERTICAL_PIXEL_STEP
+                    # The slice was taken from the horizontal center of the sensor
+                    center_u = 256 
+
+                    # Convert depth to camera-space coordinates (in meters)
+                    z_cam = depth_mm / 1000.0
+                    x_cam = (center_u - CX_DEPTH) * z_cam / FX_DEPTH
+                    y_cam = (v - CY_DEPTH) * z_cam / FY_DEPTH
+
+                    # Rotate the camera-space point into world-space
+                    world_x = z_cam * math.sin(current_angle_rad) + x_cam * math.cos(current_angle_rad)
+                    world_y = y_cam # Height is not affected by rotation around vertical axis
+                    world_z = z_cam * math.cos(current_angle_rad) - x_cam * math.sin(current_angle_rad)
+                    
+                    world_points.append([world_x, world_y, world_z])
+                
+                print(f"Processing line {i+1}...", end='\r')
+
     except FileNotFoundError:
         print(f"Error: File not found at '{filename}'")
-        return
+        return []
+    except Exception as e:
+        print(f"\nAn error occurred during processing: {e}")
+        return []
 
-    if not points:
-        print("No valid points found in the file.")
-        return
-
-    # --- PNG Map Generation (Top-Down View) ---
-    # We use x and z for the 2D map projection. y is height.
-    min_x = min(p[0] for p in points)
-    max_x = max(p[0] for p in points)
-    min_z = min(p[2] for p in points)
-    max_z = max(p[2] for p in points)
-
-    map_width_mm = max_x - min_x
-    map_height_mm = max_z - min_z
-    map_width_pixels = int(map_width_mm / MAP_RESOLUTION_MM_PER_PIXEL) + 1
-    map_height_pixels = int(map_height_mm / MAP_RESOLUTION_MM_PER_PIXEL) + 1
-
-    print(f"Map dimensions: {map_width_pixels}px x {map_height_pixels}px")
-
-    grid_map = np.zeros((map_height_pixels, map_width_pixels), dtype=np.uint8)
-
-    # Map each point to a pixel on the grid based on its x and z coordinates
-    for x_mm, y_mm, z_mm in points:
-        translated_x = x_mm - min_x
-        translated_z = z_mm - min_z # Use z for the vertical axis of the 2D map
-
-        pixel_x = int(translated_x / MAP_RESOLUTION_MM_PER_PIXEL)
-        # Invert z-axis for correct image orientation (0,0 is top-left)
-        pixel_y = (map_height_pixels - 1) - int(translated_z / MAP_RESOLUTION_MM_PER_PIXEL)
-
-        if 0 <= pixel_x < map_width_pixels and 0 <= pixel_y < map_height_pixels:
-            grid_map[pixel_y, pixel_x] = 255
-
-    img = Image.fromarray(grid_map, 'L')
-    
-    # Define output paths to be in the same directory as the script.
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    png_output_path = os.path.join(script_dir, OUTPUT_IMAGE_FILENAME)
-    pcd_output_path = os.path.join(script_dir, OUTPUT_PCD_FILENAME)
-
-    img.save(png_output_path)
-    print(f"✅ Map successfully saved to '{png_output_path}'")
-
-    # --- PCD File Generation ---
-    save_points_to_pcd(points, pcd_output_path)
-
+    return world_points
 
 if __name__ == "__main__":
-    latest_csv = find_latest_point_cloud_file(POINT_CLOUD_DIR)
+    print("--- Raw Scan Data Processor ---")
+    latest_csv = find_latest_raw_scan_file(RAW_DATA_DIR)
+    
     if latest_csv:
-        process_point_cloud(latest_csv)
+        collected_points_3d = process_raw_data(latest_csv)
+        
+        if collected_points_3d:
+            output_path = os.path.join(SCRIPT_DIR, OUTPUT_PCD_FILENAME)
+            save_points_to_pcd(collected_points_3d, output_path)
     else:
-        print(f"No point_cloud_map_*.csv file found in '{POINT_CLOUD_DIR}'.")
+        print(f"No raw_scan_data_*.csv file found in '{RAW_DATA_DIR}'.")
+        print("Please run 'PointcloudMapper.py' first to generate data.")
