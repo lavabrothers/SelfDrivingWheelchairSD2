@@ -9,6 +9,7 @@
 # 2. get_nearest_object_angle(): Uses depth frame to find the closest obstacle.
 #
 # --- UPDATED: To show distance in visual test mode ---
+# --- UPDATED: To make get_nearest_object_angle stateful on object loss ---
 
 import time
 import numpy as np
@@ -32,10 +33,11 @@ CLASS_ID_PERSON = 15         # Class ID for "person" in this model
 # --- Constants for get_nearest_object_angle() ---
 KINECT_H_FOV = 70.6          # Horizontal Field of View (approx. 70.6 degrees)
 KINECT_WIDTH = 512           # Depth map width (512 pixels)
-SMOOTHING_FACTOR = 0.9       # Smoothing for cruise control (0.9 = heavy)
+# --- MODIFIED: Clarified smoothing comment ---
+SMOOTHING_FACTOR = 0.9       # Weight of the NEW value (0.9 = light smoothing, 0.1 = heavy)
 CROP_BOTTOM_RATIO = 0.05     # Crop 5% from bottom (ignore floor)
-CROP_LEFT_RATIO = 0.2        # Crop 20% from left
-CROP_RIGHT_RATIO = 0.2       # Crop 20% from right
+CROP_LEFT_RATIO = 0.35        # Crop 35% from left
+CROP_RIGHT_RATIO = 0.35       # Crop 35% from right
 
 # --- Module-level Globals ---
 freenect2 = None
@@ -45,11 +47,10 @@ net = None                   # For the DNN
 frames = None                # Re-usable FrameMap
 frame_count = 0              # For frame skipping
 
-# --- *** MODIFIED FIX *** ---
-# Add state variable to hold the last good detection
+# --- State for find_target_person() ---
 last_good_target_state = (None, None, DETECTION_WIDTH_PX)
 
-# State variables for get_nearest_object_angle smoothing
+# --- State for get_nearest_object_angle() ---
 last_known_depth = None
 last_known_angle = None
 last_known_coords = None
@@ -132,8 +133,6 @@ def find_target_person(visualize=False):
         'target_state' (tuple): (dist_ft, center_x, frame_width)
         'debug_frame' (np.array): OpenCV image or None
     """
-    # --- *** MODIFIED FIX *** ---
-    # Make sure to include the new global variable
     global listener, frames, frame_count, net, last_good_target_state
 
     if not listener or not net:
@@ -143,7 +142,6 @@ def find_target_person(visualize=False):
     # 1. Wait for a new frame pair
     if not listener.waitForNewFrame(frames, 10 * 1000): # 10 sec timeout
         print("Kinect timeout in find_target_person...", end='\r')
-        # --- *** MODIFIED FIX *** ---
         # Return last known state on timeout
         return last_good_target_state, None
     
@@ -160,7 +158,6 @@ def find_target_person(visualize=False):
     # 4. Check if we should process this frame
     frame_count += 1
     if frame_count % PROCESS_EVERY_NTH_FRAME != 0:
-        # --- *** MODIFIED FIX *** ---
         # Return last known state on skipped frame
         return last_good_target_state, None 
 
@@ -233,29 +230,20 @@ def find_target_person(visualize=False):
                 closest_point_mm = np.min(valid_depths)
                 current_dist_ft = closest_point_mm * MM_TO_FEET
 
-        # --- MODIFIED: Visualization logic moved here ---
-        # Now we can draw the distance, because we just calculated it
         if visualize and debug_frame is not None:
             cv2.rectangle(debug_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            
-            # Draw confidence label
             conf_label = f"Person: {best_target_confidence:.2f}"
             cv2.putText(debug_frame, conf_label, (x, y - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            
-            # Draw distance label
             if current_dist_ft is not None:
                 dist_label = f"{current_dist_ft:.1f} ft"
                 cv2.putText(debug_frame, dist_label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        # --- END OF MODIFICATION ---
 
         if current_dist_ft is not None and current_dist_ft > 1.0:
-            # --- *** MODIFIED FIX *** ---
             # Store the good detection before returning
             last_good_target_state = (current_dist_ft, color_cX, resized_w)
             return last_good_target_state, debug_frame
 
     # --- TARGET LOST (DNN failed or < 1.0 ft) ---
-    # --- *** MODIFIED FIX *** ---
     # Store that the target is lost
     last_good_target_state = (None, None, resized_w)
     return last_good_target_state, debug_frame
@@ -268,7 +256,8 @@ def get_nearest_object_angle():
     Returns:
         (float, float, tuple): A tuple of (minimum_depth, angle, (x, y))
                        'minimum_depth' is the depth in **millimeters**.
-                       Returns (last_known, last_known, last_known) on failure.
+                       Returns (last_known, last_known, last_known) on *timeout/error*.
+                       Returns (None, None, None) if *no object is found*.
     """
     global listener, frames, last_known_depth, last_known_angle, last_known_coords
 
@@ -280,6 +269,7 @@ def get_nearest_object_angle():
         # 1. Wait for a new frame pair
         if not listener.waitForNewFrame(frames, 10 * 1000): # 10 sec timeout
             print("Kinect timeout in get_nearest_object...", end='\r')
+            # On timeout, trust the last known state for safety
             return last_known_depth, last_known_angle, last_known_coords
 
         # 2. Get depth frame and data
@@ -289,7 +279,7 @@ def get_nearest_object_angle():
         # 3. Release frames *immediately*
         listener.release(frames)
         
-        # 4. Crop logic (from kinectcloseobject)
+        # 4. Crop logic
         height, width = depth_map.shape # 424, 512
         crop_row_bottom = int(height * (1.0 - CROP_BOTTOM_RATIO))
         crop_col_left = int(width * CROP_LEFT_RATIO)
@@ -299,12 +289,22 @@ def get_nearest_object_angle():
         
         # 5. Find depth
         valid_depths = depth_map_roi[depth_map_roi > 0]
+        
+        # --- *** MODIFIED FIX *** ---
+        # Check if an object was actually found
         if valid_depths.size == 0:
-            return last_known_depth, last_known_angle, last_known_coords
+            # NO OBJECT FOUND: This is a valid reading.
+            # Reset the state to None so the chair knows it's clear.
+            last_known_depth = None
+            last_known_angle = None
+            last_known_coords = None
+            return None, None, None
+        # --- *** END OF MODIFICATION *** ---
 
+        # 6. --- OBJECT WAS FOUND ---
+        # Calculate new values
         new_depth = np.percentile(valid_depths, 1)
 
-        # 6. Find angle logic (from kinectcloseobject)
         search_map = np.where(depth_map_roi == 0, 999999, depth_map_roi)
         y_roi, x_roi = np.unravel_index(np.argmin(search_map), search_map.shape)
 
@@ -314,11 +314,13 @@ def get_nearest_object_angle():
         normalized_x = (x_full_frame - (KINECT_WIDTH / 2.0)) / (KINECT_WIDTH / 2.0)
         new_angle = normalized_x * (KINECT_H_FOV / 2.0)
 
-        # 7. Smoothing (from kinectcloseobject)
+        # 7. Apply smoothing and update the state
         if last_known_depth is None:
+            # First detection, just set the values
             last_known_depth = new_depth
             last_known_angle = new_angle
         else:
+            # Apply smoothing
             last_known_depth = (new_depth * SMOOTHING_FACTOR) + \
                                (last_known_depth * (1.0 - SMOOTHING_FACTOR))
             last_known_angle = (new_angle * SMOOTHING_FACTOR) + \
@@ -329,6 +331,7 @@ def get_nearest_object_angle():
 
     except Exception as e:
         print(f"Error in get_nearest_object_angle: {e}")
+        # On a code exception, trust the last state for safety
         return last_known_depth, last_known_angle, last_known_coords
 
 # --- Test Mode ---
@@ -355,7 +358,7 @@ if __name__ == "__main__":
                 time.sleep(0.01) # Frame was skipped
                 continue
 
-            # Console print (already existed)
+            # Console print
             if dist_ft is not None:
                 print(f"Target Found: {dist_ft:.1f} ft away, at pixel {center_x} (Frame width: {frame_w}) ", end='\r')
             else:

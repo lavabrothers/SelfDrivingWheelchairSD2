@@ -18,7 +18,7 @@ import person_detector as vision
 ADC_MAX = 4095.0  # ESP32's ADC is 12-bit
 
 # --- Cruise Mode Constants ---
-CRUISE_STOP_DISTANCE_MM = 1500  # 1.5 meters
+CRUISE_STOP_DISTANCE_MM = 1750  # 1.750 meters
 CRUISE_SPEED = 0.3              # 30% speed
 
 # --- Follow Mode Constants ---

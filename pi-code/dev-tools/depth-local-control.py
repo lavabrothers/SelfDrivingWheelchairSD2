@@ -119,7 +119,7 @@ def on_release(key):
 # --- Main Program ---
 if __name__ == "__main__":
 
-    # --- ADDED: Path correction to import from ../Refactoring ---
+    # --- REFACTORED: Path correction for new module ---
     # Get the directory of the current script (dev-tools)
     script_dir = os.path.dirname(os.path.realpath(__file__))
     # Get the parent directory (project root)
@@ -129,10 +129,10 @@ if __name__ == "__main__":
     sys.path.append(refactoring_dir)
     
     try:
-        # Import the object detection script
-        import kinectcloseobject as kinect_sensor
+        # Import the new person_detector module
+        import person_detector as kinect_sensor
     except ImportError:
-        print(f"Error: Could not import 'kinectcloseobject.py' from {refactoring_dir}")
+        print(f"Error: Could not import 'person_detector.py' from {refactoring_dir}")
         print("Please check the file path.")
         sys.exit(1)
     # --- END OF PATH CORRECTION ---
@@ -145,15 +145,13 @@ if __name__ == "__main__":
     
     show_instructions()
 
-    # --- MODIFIED: Use the kinect_sensor module to initialize ---
-    # This single initialization requests BOTH Color and Depth frames.
-    if not kinect_sensor.initialize_kinect():
+    # --- REFACTORED: Use the person_detector module to initialize ---
+    # This initializes the module's global listener
+    if not kinect_sensor.initialize_detector():
         print("Error: Kinect initialization failed. Exiting.")
         sys.exit(1)
     
     print("Kinect v2 camera and depth sensor started.")
-    # We will use the listener from the kinect_sensor module
-    # kinect_sensor.listener
     # --- END OF MODIFICATION ---
 
     # --- Start pynput listener in a non-blocking thread ---
@@ -167,6 +165,7 @@ if __name__ == "__main__":
 
     while running:
         # 1. Get new frames from the sensor
+        # --- REFACTORED: Use the module's global listener and local frames ---
         if not kinect_sensor.listener.waitForNewFrame(frames, 10 * 1000):
             print("Timeout waiting for frames!")
             continue
@@ -177,9 +176,41 @@ if __name__ == "__main__":
         # 2. Get the raw depth map
         depth_map = depth_frame.asarray()
         
-        # 3. Call the object detection function
-        # We pass the frame we already grabbed to avoid re-grabbing
-        depth, angle, coords = kinect_sensor.get_nearest_object_angle(depth_frame_obj=depth_frame)
+        # --- 3. REFACTORED: Perform sensor logic locally for visualization ---
+        # This logic is copied from person_detector.get_nearest_object_angle
+        # It uses the constants from the imported module, so it stays in sync.
+        
+        depth, angle, coords = None, None, None # Default values
+        
+        try:
+            # 4. Crop logic
+            height, width = depth_map.shape # 424, 512
+            crop_row_bottom = int(height * (1.0 - kinect_sensor.CROP_BOTTOM_RATIO))
+            crop_col_left = int(width * kinect_sensor.CROP_LEFT_RATIO)
+            crop_col_right = int(width * (1.0 - kinect_sensor.CROP_RIGHT_RATIO))
+
+            depth_map_roi = depth_map[0:crop_row_bottom, crop_col_left:crop_col_right]
+            
+            # 5. Find depth
+            valid_depths = depth_map_roi[depth_map_roi > 0]
+            
+            if valid_depths.size > 0:
+                # 6. --- OBJECT WAS FOUND ---
+                depth = np.percentile(valid_depths, 1) # Use 'depth' directly
+
+                search_map = np.where(depth_map_roi == 0, 999999, depth_map_roi)
+                y_roi, x_roi = np.unravel_index(np.argmin(search_map), search_map.shape)
+
+                x_full_frame = x_roi + crop_col_left
+                y_full_frame = y_roi 
+                coords = (x_full_frame, y_full_frame) # Use 'coords' directly
+
+                normalized_x = (x_full_frame - (kinect_sensor.KINECT_WIDTH / 2.0)) / (kinect_sensor.KINECT_WIDTH / 2.0)
+                angle = normalized_x * (kinect_sensor.KINECT_H_FOV / 2.0) # Use 'angle' directly
+                
+        except Exception as e:
+            print(f"Error during depth analysis: {e}")
+            depth, angle, coords = None, None, None
         
         # --- 4. Process and Display the RGB Driver View (Window 1) ---
         img = color_frame.asarray(dtype=np.uint8)
@@ -189,26 +220,47 @@ if __name__ == "__main__":
         cv2.imshow("Kinect v2 RGB Feed (Driver View)", img_flipped)
 
         # --- 5. Process and Display the Depth Object View (Window 2) ---
-        # (This visualization code is from kinect_sensor.py's test mode)
         depth_viz = np.clip(depth_map, 500, 4500)
         depth_viz = (depth_viz - 500) / (4000.0)
         depth_viz = (255 * (1.0 - depth_viz)).astype(np.uint8)
         depth_viz[depth_map == 0] = 0
         image_color = cv2.cvtColor(depth_viz, cv2.COLOR_GRAY2BGR)
 
-        # Draw the crop line
-        viz_height = image_color.shape[0]
+        # Get frame dimensions for drawing
+        viz_height = image_color.shape[0] # 424
+        viz_width = kinect_sensor.KINECT_WIDTH # 512 (Use constant for accuracy)
+
+        # --- This visualization code now correctly uses the imported constants ---
+        # Draw the BOTTOM crop line
         crop_row_viz = int(viz_height * (1.0 - kinect_sensor.CROP_BOTTOM_RATIO))
-        cv2.line(image_color, (0, crop_row_viz), (kinect_sensor.KINECT_WIDTH - 1, crop_row_viz), 
+        cv2.line(image_color, (0, crop_row_viz), (viz_width - 1, crop_row_viz), 
                  (255, 255, 0), 1) # Cyan line
         cv2.putText(image_color, "IGNORING THIS AREA (FLOOR)", 
                     (10, crop_row_viz + 20), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
+        # Draw the LEFT peripheral crop line
+        crop_col_left_viz = int(viz_width * kinect_sensor.CROP_LEFT_RATIO)
+        cv2.line(image_color, (crop_col_left_viz, 0), (crop_col_left_viz, viz_height - 1),
+                 (255, 255, 0), 1) # Cyan line
+        cv2.putText(image_color, "IGNORING", (5, 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+        # Draw the RIGHT peripheral crop line
+        crop_col_right_viz = int(viz_width * (1.0 - kinect_sensor.CROP_RIGHT_RATIO))
+        cv2.line(image_color, (crop_col_right_viz, 0), (crop_col_right_viz, viz_height - 1),
+                 (255, 255, 0), 1) # Cyan line
+        cv2.putText(image_color, "IGNORING", (crop_col_right_viz + 5, 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
         # Draw the detected object
         if coords is not None and depth is not None:
             x, y = coords
-            if y < crop_row_viz:
+            # Only draw the circle if it's within the *active* area
+            if (y < crop_row_viz and 
+                x > crop_col_left_viz and 
+                x < crop_col_right_viz):
+                
                 cv2.circle(image_color, (x, y), 10, (0, 0, 255), 2) # Red circle
                 text = f"{depth/1000.0:.2f} m, {angle:.1f} deg"
                 cv2.putText(image_color, text, (x + 15, y + 5), 
@@ -232,8 +284,8 @@ if __name__ == "__main__":
     if listener.is_alive():
         listener.stop()
         
-    # --- MODIFIED: Use the kinect_sensor module to shut down ---
-    kinect_sensor.shutdown_kinect()
+    # --- REFACTORED: Use the person_detector module to shut down ---
+    kinect_sensor.shutdown_detector()
     
     # Close all OpenCV windows
     cv2.destroyAllWindows()
