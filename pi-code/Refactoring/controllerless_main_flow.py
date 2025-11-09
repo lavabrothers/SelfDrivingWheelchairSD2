@@ -12,7 +12,8 @@ from enum import Enum
 import wheelchair_control as wc
 
 # --- MODIFIED: Import our new all-in-one vision module ---
-import person_detector as vision 
+import person_detector as vision
+import mapping_module as mapping
 
 # --- Constants ---
 ADC_MAX = 4095.0  # ESP32's ADC is 12-bit
@@ -22,11 +23,11 @@ CRUISE_STOP_DISTANCE_MM = 1750  # 1.750 meters
 CRUISE_SPEED = 0.3              # 30% speed
 
 # --- Follow Mode Constants ---
-FOLLOW_TARGET_DISTANCE_FT = 3.0
-FOLLOW_DEAD_ZONE_FT = 0.2
+FOLLOW_TARGET_DISTANCE_FT = 3.5
+FOLLOW_DEAD_ZONE_FT = 0.4
 FOLLOW_MOVE_SPEED = 0.3
 FOLLOW_TURN_SPEED = 0.4
-FOLLOW_TRACKING_DEAD_ZONE_PX = 30
+FOLLOW_TRACKING_DEAD_ZONE_PX = 35
 FOLLOW_TARGET_LOST_TIMEOUT_S = 3.0 # How long to search before stopping
 MM_TO_FEET = 0.00328084 # For distance conversion
 
@@ -35,7 +36,8 @@ class ControlState(Enum):
     MANUAL = 1
     CRUISE = 2
     STOPPED = 3
-    FOLLOW = 4  # Added new state
+    FOLLOW = 4
+    MAP = 5
 
 current_state = ControlState.STOPPED # Start in STOPPED mode for safety
 last_command_time = time.time()
@@ -73,6 +75,10 @@ def handle_incoming_data(message: str):
             global last_person_detection_time, last_person_turn_direction
             last_person_detection_time = 0.0
             last_person_turn_direction = 0.0
+    elif message == "MAP":
+        if current_state != ControlState.MAP:
+            print("Switching to MAP mode.")
+            current_state = ControlState.MAP
     elif message == "STOP":
         if current_state != ControlState.STOPPED:
             print("Switching to STOPPED mode.")
@@ -186,7 +192,37 @@ async def follow_person_loop():
         
         # Run this loop slightly slower as detection is heavy
         # Sleep longer when this mode isn't active
-        await asyncio.sleep(0.05 if current_state == ControlState.FOLLOW else 0.5) 
+        await asyncio.sleep(0.05 if current_state == ControlState.FOLLOW else 0.5)
+
+
+async def mapping_loop():
+    """The main logic for mapping mode."""
+    global current_state
+    print("Mapping loop started.")
+    while True:
+        if current_state == ControlState.MAP:
+            # The vision module and mapping module can't use the Kinect at the same time.
+            # We need to temporarily shut down the vision part.
+            print("Temporarily shutting down vision module for mapping...")
+            vision.shutdown_detector()
+            
+            print("\n--- Starting Mapping Sequence ---")
+            await asyncio.to_thread(mapping.perform_mapping)
+            print("\n--- Mapping Sequence Finished ---")
+
+            # Re-initialize the vision module
+            print("Re-initializing vision module...")
+            if not vision.initialize_detector():
+                print("FATAL: Could not re-initialize vision module. Stopping.")
+                # A more robust solution might try to recover here
+                current_state = ControlState.STOPPED
+            else:
+                # Return to stopped state for safety
+                current_state = ControlState.STOPPED
+                print("Returning to STOPPED mode.")
+        
+        # This is a one-shot operation, so sleep for a long time when inactive
+        await asyncio.sleep(1.0)
 
 
 # --- NEW: Function to handle terminal input non-blockingly ---
@@ -226,6 +262,12 @@ async def main():
         print("Exiting program: Vision module initialization failed.")
         wc.stop() # Ensure motors are off even if DAC init worked
         return
+    
+    if not mapping.initialize():
+        print("Exiting program: Mapping module initialization failed.")
+        vision.shutdown_detector()
+        wc.stop()
+        return
 
     # --- MODIFIED: Removed all Bluetooth initialization ---
     # bt_module = BluetoothModule()
@@ -241,6 +283,7 @@ async def main():
     print("Main loop started. Press Ctrl+C to exit.")
     cruise_task = asyncio.create_task(cruise_control_loop())
     follow_task = asyncio.create_task(follow_person_loop())
+    mapping_task = asyncio.create_task(mapping_loop())
     # --- MODIFIED: Added terminal input task ---
     input_task = asyncio.create_task(terminal_input_loop())
 
@@ -266,10 +309,12 @@ async def main():
         print("\nCleaning up resources...")
         cruise_task.cancel()
         follow_task.cancel()
+        mapping_task.cancel()
         # --- MODIFIED: Cancel input task ---
         input_task.cancel()
         # await bt_module.disconnect() # Removed
         vision.shutdown_detector()
+        mapping.shutdown()
         wc.stop()
         print("Program cleaned up and exited.")
 

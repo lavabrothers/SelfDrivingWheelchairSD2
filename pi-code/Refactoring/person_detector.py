@@ -29,12 +29,14 @@ CONFIDENCE_THRESHOLD = 0.5   # Minimum confidence for DNN
 PROTOTXT_FILE = "MobileNetSSD_deploy.prototxt.txt"
 MODEL_FILE = "MobileNetSSD_deploy.caffemodel"
 CLASS_ID_PERSON = 15         # Class ID for "person" in this model
+MIN_PERSON_DISTANCE_FT = 0.5 # Minimum valid distance for a person (filter out noise)
 
 # --- Constants for get_nearest_object_angle() ---
 KINECT_H_FOV = 70.6          # Horizontal Field of View (approx. 70.6 degrees)
 KINECT_WIDTH = 512           # Depth map width (512 pixels)
 # --- MODIFIED: Clarified smoothing comment ---
 SMOOTHING_FACTOR = 0.9       # Weight of the NEW value (0.9 = light smoothing, 0.1 = heavy)
+PERSON_SMOOTHING_FACTOR = 0.7 # Separate smoothing for person distance
 CROP_BOTTOM_RATIO = 0.05     # Crop 5% from bottom (ignore floor)
 CROP_LEFT_RATIO = 0.35        # Crop 35% from left
 CROP_RIGHT_RATIO = 0.35       # Crop 35% from right
@@ -49,6 +51,9 @@ frame_count = 0              # For frame skipping
 
 # --- State for find_target_person() ---
 last_good_target_state = (None, None, DETECTION_WIDTH_PX)
+last_known_person_dist_ft = None
+consecutive_target_losses = 0 # New state variable
+MAX_CONSECUTIVE_LOSSES = 5   # Allow 5 frames of loss before truly losing target
 
 # --- State for get_nearest_object_angle() ---
 last_known_depth = None
@@ -133,7 +138,7 @@ def find_target_person(visualize=False):
         'target_state' (tuple): (dist_ft, center_x, frame_width)
         'debug_frame' (np.array): OpenCV image or None
     """
-    global listener, frames, frame_count, net, last_good_target_state
+    global listener, frames, frame_count, net, last_good_target_state, last_known_person_dist_ft, consecutive_target_losses
 
     if not listener or not net:
         print("Error: Detector not initialized.")
@@ -228,7 +233,26 @@ def find_target_person(visualize=False):
             valid_depths = person_roi[person_roi > 0]
             if valid_depths.size > 0:
                 closest_point_mm = np.min(valid_depths)
-                current_dist_ft = closest_point_mm * MM_TO_FEET
+                new_dist_ft = closest_point_mm * MM_TO_FEET
+
+                # Filter out extremely close, likely erroneous readings
+                if new_dist_ft < MIN_PERSON_DISTANCE_FT:
+                    # Treat as no valid depth found for this frame
+                    last_known_person_dist_ft = None # Reset smoothing if it was active
+                    current_dist_ft = None
+                else:
+                    # Apply smoothing
+                    if last_known_person_dist_ft is None:
+                        current_dist_ft = new_dist_ft
+                    else:
+                        current_dist_ft = (new_dist_ft * PERSON_SMOOTHING_FACTOR) + \
+                                          (last_known_person_dist_ft * (1.0 - PERSON_SMOOTHING_FACTOR))
+                    
+                    last_known_person_dist_ft = current_dist_ft
+            # If no valid depths, current_dist_ft remains None, and last_known_person_dist_ft retains its last value.
+            # This allows smoothing to continue using the last known good value if a frame temporarily loses valid depths.
+        # If no ROI, current_dist_ft remains None, and last_known_person_dist_ft retains its last value.
+        # This allows smoothing to continue using the last known good value if a frame temporarily loses the ROI.
 
         if visualize and debug_frame is not None:
             cv2.rectangle(debug_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -239,14 +263,24 @@ def find_target_person(visualize=False):
                 cv2.putText(debug_frame, dist_label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         if current_dist_ft is not None and current_dist_ft > 1.0:
-            # Store the good detection before returning
+            # --- TARGET FOUND ---
+            consecutive_target_losses = 0 # Reset loss counter
             last_good_target_state = (current_dist_ft, color_cX, resized_w)
             return last_good_target_state, debug_frame
 
     # --- TARGET LOST (DNN failed or < 1.0 ft) ---
-    # Store that the target is lost
-    last_good_target_state = (None, None, resized_w)
-    return last_good_target_state, debug_frame
+    consecutive_target_losses += 1
+
+    if consecutive_target_losses < MAX_CONSECUTIVE_LOSSES:
+        # Temporarily lost, return the last known good state to maintain stability
+        # last_good_target_state already holds the last valid detection
+        # last_known_person_dist_ft is also retained for smoothing
+        return last_good_target_state, debug_frame
+    else:
+        # Truly lost the target after exceeding the threshold
+        last_good_target_state = (None, None, resized_w)
+        last_known_person_dist_ft = None # Reset smoothing only after prolonged loss
+        return last_good_target_state, debug_frame
 
 def get_nearest_object_angle():
     """

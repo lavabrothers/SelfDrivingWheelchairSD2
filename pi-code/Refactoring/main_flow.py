@@ -29,6 +29,9 @@ FOLLOW_TRACKING_DEAD_ZONE_PX = 30
 FOLLOW_TARGET_LOST_TIMEOUT_S = 3.0 # How long to search before stopping
 MM_TO_FEET = 0.00328084 # For distance conversion
 
+# --- Reconnection Constants ---
+RECONNECT_DELAY_S = 2 # Wait 2 seconds before attempting to reconnect
+
 # --- State Management ---
 class ControlState(Enum):
     MANUAL = 1
@@ -223,10 +226,23 @@ async def main():
             
             # 1. Check Bluetooth connection status
             if not bt_module.client.is_connected:
-                print("\nBluetooth disconnected. Stopping all operations.")
+                print("\nBluetooth disconnected. Attempting to reconnect...")
                 current_state = ControlState.STOPPED
                 wc.stop()
-                break # Exit the main loop to trigger cleanup
+                
+                reconnected = False
+                while not reconnected:
+                    print(f"Trying to reconnect in {RECONNECT_DELAY_S} seconds...")
+                    await asyncio.sleep(RECONNECT_DELAY_S)
+                    if await bt_module.connect():
+                        print("\nBluetooth reconnected successfully!")
+                        await bt_module.start_listening(handle_incoming_data) # Restart listening
+                        reconnected = True
+                    else:
+                        print("Reconnection failed. Retrying...")
+                
+                # If reconnected, continue the main loop
+                continue
 
             # 2. Check for manual mode timeout
             time_since_cmd = time.time() - last_command_time
