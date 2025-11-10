@@ -11,7 +11,8 @@ from bluetooth_module import BluetoothModule
 import wheelchair_control as wc
 
 # --- MODIFIED: Import our new all-in-one vision module ---
-import person_detector as vision 
+import person_detector as vision
+import mapping_module as mapping
 
 # --- Constants ---
 ADC_MAX = 4095.0  # ESP32's ADC is 12-bit
@@ -37,7 +38,8 @@ class ControlState(Enum):
     MANUAL = 1
     CRUISE = 2
     STOPPED = 3
-    FOLLOW = 4  # Added new state
+    FOLLOW = 4
+    MAPPING = 5 # Added new state
 
 current_state = ControlState.STOPPED # Start in STOPPED mode for safety
 last_command_time = time.time()
@@ -76,6 +78,10 @@ def handle_incoming_data(data: bytes):
             global last_person_detection_time, last_person_turn_direction
             last_person_detection_time = 0.0
             last_person_turn_direction = 0.0
+    elif message == "Map":
+        if current_state != ControlState.MAPPING:
+            print("Switching to MAPPING mode.")
+            current_state = ControlState.MAPPING
     elif message == "STOP":
         if current_state != ControlState.STOPPED:
             print("Switching to STOPPED mode.")
@@ -191,6 +197,21 @@ async def follow_person_loop():
         # Sleep longer when this mode isn't active
         await asyncio.sleep(0.05 if current_state == ControlState.FOLLOW else 0.5) 
 
+async def mapping_loop():
+    """The main logic for mapping mode."""
+    global current_state
+    print("Mapping loop started.")
+    while True:
+        if current_state == ControlState.MAPPING:
+            print("Starting 360-degree mapping scan...")
+            # Perform the blocking mapping operation in a separate thread
+            await asyncio.to_thread(mapping.perform_mapping)
+            print("Mapping scan complete. Switching to STOPPED mode.")
+            current_state = ControlState.STOPPED # Return to stopped after mapping
+            wc.stop() # Ensure motors are off
+        
+        # Sleep longer when this mode isn't active
+        await asyncio.sleep(0.5 if current_state == ControlState.MAPPING else 0.5)
 
 async def main():
     """Main asynchronous function for the wheelchair control flow."""
@@ -206,10 +227,17 @@ async def main():
         wc.stop() # Ensure motors are off even if DAC init worked
         return
 
+    if not mapping.initialize():
+        print("Exiting program: Mapping module initialization failed.")
+        vision.shutdown_detector()
+        wc.stop()
+        return
+
     bt_module = BluetoothModule()
     if not await bt_module.connect():
         print("Exiting program: Bluetooth connection failed.")
         vision.shutdown_detector()
+        mapping.shutdown()
         wc.stop()
         return
 
@@ -219,6 +247,7 @@ async def main():
     print("Main loop started. Press Ctrl+C to exit.")
     cruise_task = asyncio.create_task(cruise_control_loop())
     follow_task = asyncio.create_task(follow_person_loop())
+    mapping_task = asyncio.create_task(mapping_loop())
 
     try:
         while True:
@@ -260,8 +289,10 @@ async def main():
         print("\nCleaning up resources...")
         cruise_task.cancel()
         follow_task.cancel()
+        mapping_task.cancel()
         await bt_module.disconnect()
         vision.shutdown_detector()
+        mapping.shutdown()
         wc.stop()
         print("Program cleaned up and exited.")
 
