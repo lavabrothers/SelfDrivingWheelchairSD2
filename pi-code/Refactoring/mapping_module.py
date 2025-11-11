@@ -12,21 +12,23 @@ import datetime
 import subprocess
 import wheelchair_control as wc
 import mpu as imu
-from pylibfreenect2 import Freenect2, SyncMultiFrameListener, FrameType, FrameMap
+# <--- MODIFIED: Import the vision module to get its lock/listener ---
+import person_detector as vision
+from pylibfreenect2 import FrameType, FrameMap
 
 # --- Configuration ---
-SCAN_SPEED = 0.2
+SCAN_SPEED = 0.15
 RAW_DATA_FILENAME_PREFIX = "raw_scan_data"
 
-# --- Global variables for Kinect ---
-freenect2 = None
-device = None
+# --- Global variables ---
+# <--- MODIFIED: We no longer manage the kinect device, just use its listener ---
 listener = None
+frames = None
 latest_csv_filename = None
-_kinect_initialized_by_this_module = False
 
 def initialize():
     """Initializes all hardware required for mapping."""
+    global listener, frames # <--- ADDED globals
     print("--- Initializing Mapping Module ---")
     if not wc.initialize_dac():
         print("FATAL: DAC initialization failed.")
@@ -34,73 +36,31 @@ def initialize():
     if not imu.initialize_imu():
         print("FATAL: IMU initialization failed.")
         return False
-    if not initialize_kinect():
-        print("FATAL: Kinect initialization failed.")
+    
+    # <--- MODIFIED: Get listener from person_detector ---
+    if 'person_detector' not in sys.modules or vision.listener is None or vision.frames is None:
+        print("FATAL: Could not get Kinect listener from vision module.")
+        print("Ensure vision.initialize_detector() is called first.")
         return False
+    
+    print("Mapping module acquiring listener from person_detector... ✅")
+    listener = vision.listener # Use the *exact same* listener
+    frames = vision.frames     # Use the *exact same* FrameMap
+    
     print("--- Mapping Module Initialized OK ✅ ---")
     return True
 
-def initialize_kinect():
-    """Initializes and starts the Kinect V2 sensor using pylibfreenect2."""
-    global freenect2, device, listener, _kinect_initialized_by_this_module
-    
-    # If another module (like person_detector) has already initialized freenect2,
-    # we can likely re-use the instance. This is a simplification to avoid
-    # complex hardware sharing logic for now.
-    if 'person_detector' in sys.modules and sys.modules['person_detector'].freenect2 is not None:
-        print("Kinect already initialized by another module. Re-using instance.")
-        freenect2 = sys.modules['person_detector'].freenect2
-        device = sys.modules['person_detector'].kinect
-        # We still need our own listener for the depth frames
-        listener = SyncMultiFrameListener(FrameType.Depth)
-        device.setIrAndDepthFrameListener(listener)
-        device.start() # Ensure it's started
-        _kinect_initialized_by_this_module = False # Mark that we didn't init it
-        return True
-
-    try:
-        print("Initializing Kinect V2 device...")
-        freenect2 = Freenect2()
-        if freenect2.enumerateDevices() == 0:
-            print("FATAL: No Kinect V2 devices found!")
-            return False
-            
-        serial = freenect2.getDeviceSerialNumber(0)
-        device = freenect2.openDevice(serial)
-        
-        listener = SyncMultiFrameListener(FrameType.Depth)
-        device.setIrAndDepthFrameListener(listener)
-        
-        print(f"Starting Kinect V2 stream (Serial: {serial})...")
-        device.start()
-        _kinect_initialized_by_this_module = True # Mark that we initialized it
-        print("Kinect OK. ✅")
-        return True
-        
-    except Exception as e:
-        print(f"FATAL: Could not initialize Kinect: {e}")
-        return False
+# <--- REMOVED: initialize_kinect() is no longer needed ---
 
 def shutdown():
     """Shuts down all hardware used by the mapping module."""
     print("\n--- Shutting Down Mapping Module ---")
     wc.stop()
-    shutdown_kinect()
+    # <--- MODIFIED: We do not shut down the kinect here. ---
+    # The main program will call vision.shutdown_detector()
     print("--- Mapping Module Shutdown Complete ---")
 
-def shutdown_kinect():
-    """Stops and closes the Kinect V2 device."""
-    global device, _kinect_initialized_by_this_module
-    if device and _kinect_initialized_by_this_module:
-        print("Shutting down Kinect V2 (initialized by mapping_module)...")
-        try:
-            device.stop()
-            device.close()
-            print("Kinect shutdown complete.")
-        except Exception as e:
-            print(f"Error during Kinect shutdown: {e}")
-    elif device:
-        print("Skipping Kinect shutdown (not initialized by this module).")
+# <--- REMOVED: shutdown_kinect() is no longer needed ---
 
 def perform_mapping():
     """
@@ -108,7 +68,6 @@ def perform_mapping():
     """
     global latest_csv_filename
     
-    # Save the CSV in the parent directory ('pi-code')
     script_dir = os.path.dirname(__file__)
     output_dir = os.path.abspath(os.path.join(script_dir, '..'))
     filename = os.path.join(output_dir, f"{RAW_DATA_FILENAME_PREFIX}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
@@ -122,7 +81,6 @@ def perform_mapping():
             _perform_360_capture(csv_writer)
         print("\n--- Raw data capture complete ---")
         
-        # Automatically process the captured data
         _process_data()
 
     except Exception as e:
@@ -134,10 +92,11 @@ def _perform_360_capture(csv_writer):
     """
     Rotates the wheelchair 360 degrees and writes raw depth data.
     """
-    global listener
+    global listener, frames # <--- MODIFIED
     print("\n--- Starting 360° Raw Data Capture ---")
     total_angle_turned = 0.0
-    frames = FrameMap()
+    # <--- REMOVED: Do not create a new FrameMap, use the global one ---
+    # frames = FrameMap()
 
     try:
         print("Beginning rotation...")
@@ -145,12 +104,20 @@ def _perform_360_capture(csv_writer):
         last_time = time.monotonic()
 
         while total_angle_turned < 360.0:
-            if not listener.waitForNewFrame(frames, 10 * 1000):
-                print("\nTimeout waiting for new Kinect frame. Aborting scan.")
-                break
-
-            depth_frame = frames[FrameType.Depth]
+            depth_frame = None
             
+            # <--- MODIFIED: Use the lock from the vision module ---
+            with vision.kinect_lock:
+                if not listener.waitForNewFrame(frames, 10 * 1000):
+                    print("\nTimeout waiting for new Kinect frame. Aborting scan.")
+                    break
+
+                depth_frame = frames[FrameType.Depth]
+                depth_data = depth_frame.asarray() # Get data *inside* the lock
+                
+                listener.release(frames) # Release *inside* the lock
+            # <--- MODIFIED: Lock is released here ---
+
             current_time = time.monotonic()
             time_delta = current_time - last_time
             last_time = current_time
@@ -159,7 +126,6 @@ def _perform_360_capture(csv_writer):
             gyro_z_dps = gyro_data[2]
             total_angle_turned += abs(gyro_z_dps * time_delta)
 
-            depth_data = depth_frame.asarray()
             center_u = depth_data.shape[1] // 2
             depth_slice = depth_data[:, center_u]
             
@@ -168,8 +134,6 @@ def _perform_360_capture(csv_writer):
 
             print(f"Capturing... Angle: {total_angle_turned:.1f}° / 360°", end='\r')
             
-            listener.release(frames)
-
     finally:
         print("\nCapture rotation complete. Stopping motors.")
         wc.stop()
@@ -182,12 +146,9 @@ def _process_data():
     if latest_csv_filename:
         print("\n--- Starting Point Cloud Processing ---")
         try:
-            # Construct a robust path to the processing script
             script_dir = os.path.dirname(__file__)
             script_path = os.path.join(script_dir, "process_pointcloud.py")
             
-            # The processing script finds the latest CSV in the parent dir,
-            # which is where we saved it.
             subprocess.run(["python3", script_path], check=True, cwd=os.path.dirname(script_dir))
             print("--- Point Cloud Processing Complete ✅ ---")
         except FileNotFoundError:
@@ -198,22 +159,7 @@ def _process_data():
         print("No data file was captured, skipping processing.")
 
 if __name__ == "__main__":
-    print("="*50)
-    print("!! SAFETY WARNING !!")
-    print("This script will move the wheelchair in a full circle.")
-    print("Ensure the area is clear and wheels are OFF THE GROUND for initial testing.")
-    print("="*50)
-    
-    try:
-        for i in range(5, 0, -1):
-            print(f"Starting in {i}...", end="\r")
-            time.sleep(1)
-        print("Starting test mapping sequence...")
-        
-        if initialize():
-            perform_mapping()
-    except KeyboardInterrupt:
-        print("\nProgram cancelled by user.")
-    finally:
-        shutdown()
-        print("\nTest complete.")
+    # ... (Test mode remains the same, but now requires person_detector.py) ...
+    print("WARNING: Test mode for mapping_module.py is now dependent on")
+    print("person_detector.py being present and its models.")
+    print("It is recommended to run the main visual_main_flow.py instead.")
