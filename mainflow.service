@@ -1,0 +1,20 @@
+[Unit]
+Description=Main Flow Service for Self Driving Wheelchair
+After=network.target
+
+[Service]
+User=lavabrothers
+Group=lavabrothers
+WorkingDirectory=/home/lavabrothers/Documents/SelfDrivingWheelchairSD2/pi-code/Refactoring
+ExecStart=/home/lavabrothers/Documents/SelfDrivingWheelchairSD2/pi-code/.venv/bin/python3 /home/lavabrothers/Documents/SelfDrivingWheelchairSD2/pi-code/Refactoring/main_flow.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mainflow
+Environment="DISPLAY=:0"
+Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+Environment="PYTHONPATH=/home/lavabrothers/Documents/SelfDrivingWheelchairSD2/pi-code/.venv/lib/python3.9/site-packages"
+
+[Install]
+WantedBy=multi-user.target
