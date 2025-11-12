@@ -10,6 +10,7 @@ import os
 import csv
 import datetime
 import subprocess
+import threading  # <--- IMPORTED for the stop_event
 import wheelchair_control as wc
 import mpu as imu
 # <--- MODIFIED: Import the vision module to get its lock/listener ---
@@ -28,7 +29,7 @@ latest_csv_filename = None
 
 def initialize():
     """Initializes all hardware required for mapping."""
-    global listener, frames # <--- ADDED globals
+    global listener, frames
     print("--- Initializing Mapping Module ---")
     if not wc.initialize_dac():
         print("FATAL: DAC initialization failed.")
@@ -62,9 +63,10 @@ def shutdown():
 
 # <--- REMOVED: shutdown_kinect() is no longer needed ---
 
-def perform_mapping():
+def perform_mapping(stop_event: threading.Event):
     """
     Performs a 360-degree scan, saves the data, and processes it.
+    Checks for a stop_event to halt the process.
     """
     global latest_csv_filename
     
@@ -78,25 +80,28 @@ def perform_mapping():
     try:
         with open(filename, 'w', newline='') as f:
             csv_writer = csv.writer(f)
-            _perform_360_capture(csv_writer)
-        print("\n--- Raw data capture complete ---")
+            # Pass the stop_event to the capture function
+            _perform_360_capture(csv_writer, stop_event)
         
-        _process_data()
+        # Only process data if the scan wasn't stopped
+        if not stop_event.is_set():
+            print("\n--- Raw data capture complete ---")
+            _process_data()
+        else:
+            print("\n--- Raw data capture interrupted. Skipping processing. ---")
 
     except Exception as e:
         print(f"\nAn unexpected error occurred during mapping: {e}")
     finally:
         wc.stop()
 
-def _perform_360_capture(csv_writer):
+def _perform_360_capture(csv_writer, stop_event: threading.Event):
     """
     Rotates the wheelchair 360 degrees and writes raw depth data.
     """
-    global listener, frames # <--- MODIFIED
+    global listener, frames
     print("\n--- Starting 360° Raw Data Capture ---")
     total_angle_turned = 0.0
-    # <--- REMOVED: Do not create a new FrameMap, use the global one ---
-    # frames = FrameMap()
 
     try:
         print("Beginning rotation...")
@@ -104,6 +109,13 @@ def _perform_360_capture(csv_writer):
         last_time = time.monotonic()
 
         while total_angle_turned < 360.0:
+            
+            # --- THIS IS THE STOP CHECK ---
+            if stop_event.is_set():
+                print("\nMapping scan: Stop signal received. Halting rotation.")
+                break
+            # -----------------------------
+
             depth_frame = None
             
             # <--- MODIFIED: Use the lock from the vision module ---

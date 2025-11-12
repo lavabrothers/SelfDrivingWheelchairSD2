@@ -7,17 +7,19 @@
 import asyncio
 import time
 from enum import Enum
+import threading  # For the mapping stop event
 from bluetooth_module import BluetoothModule
 import wheelchair_control as wc
 import person_detector as vision
 import mapping_module as mapping
+import audio_feedback as beeper
 
 # --- Constants ---
 ADC_MAX = 4095.0
 DEBUG_PRINT = False 
 
 # --- Cruise Mode Constants ---
-CRUISE_STOP_DISTANCE_MM = 1500
+CRUISE_STOP_DISTANCE_MM = 1350
 CRUISE_SPEED = 0.3
 
 # --- Follow Mode Constants ---
@@ -42,6 +44,7 @@ class ControlState(Enum):
 
 current_state = ControlState.STOPPED
 last_command_time = time.time()
+mapping_stop_event = threading.Event()  # Event to signal mapping thread to stop
 
 # --- State variables for follow mode ---
 last_person_detection_time = 0.0
@@ -52,7 +55,7 @@ def handle_incoming_data(data: bytes):
     """
     Parses incoming data and updates the control state.
     """
-    global current_state, last_command_time
+    global current_state, last_command_time, mapping_stop_event
     
     try:
         message = data.decode().strip()
@@ -67,11 +70,13 @@ def handle_incoming_data(data: bytes):
             print("Switching to CRUISE mode.")
             wc.stop()
             current_state = ControlState.CRUISE
+            asyncio.create_task(beeper.play_beep(3))
     elif message == "Follow":
         if current_state != ControlState.FOLLOW:
             print("Switching to FOLLOW mode.")
             wc.stop()
             current_state = ControlState.FOLLOW
+            asyncio.create_task(beeper.play_beep(4))
             global last_person_detection_time, last_person_turn_direction
             last_person_detection_time = 0.0
             last_person_turn_direction = 0.0
@@ -80,15 +85,23 @@ def handle_incoming_data(data: bytes):
             print("Switching to MAPPING mode.")
             wc.stop()
             current_state = ControlState.MAPPING
+            asyncio.create_task(beeper.play_beep(5))
     elif message == "STOP":
+        # If we are mapping, signal the mapping thread to stop
+        if current_state == ControlState.MAPPING:
+            print("Requesting mapping task to stop...")
+            mapping_stop_event.set()  # Signal the thread to stop
+
         if current_state != ControlState.STOPPED:
             print("Switching to STOPPED mode.")
             wc.stop()
             current_state = ControlState.STOPPED
+            asyncio.create_task(beeper.play_beep(1))
     else:
         if current_state != ControlState.MANUAL:
             print("Switching to MANUAL mode.")
             current_state = ControlState.MANUAL
+            asyncio.create_task(beeper.play_beep(2))
         
         try:
             parts = [int(p) for p in message.split(',')]
@@ -186,13 +199,24 @@ async def follow_person_loop():
 
 async def mapping_loop():
     """The main logic for mapping mode."""
-    global current_state
+    global current_state, mapping_stop_event
     print("Mapping loop started.")
     while True:
         if current_state == ControlState.MAPPING:
+            
+            mapping_stop_event.clear()  # Clear the flag before starting a new scan
+            
             print("Starting 360-degree mapping scan...")
-            await asyncio.to_thread(mapping.perform_mapping)
-            print("Mapping scan complete. Switching to STOPPED mode.")
+            
+            # Pass the event to the thread function
+            await asyncio.to_thread(mapping.perform_mapping, mapping_stop_event)
+            
+            if mapping_stop_event.is_set():
+                print("Mapping scan was INTERRUPTED by user.")
+            else:
+                print("Mapping scan complete.")
+            
+            # This now runs after mapping finishes OR is interrupted
             current_state = ControlState.STOPPED 
             wc.stop() 
         
@@ -202,49 +226,120 @@ async def main():
     """Main asynchronous function for the wheelchair control flow."""
     global last_command_time, current_state
     
+    # Flags will be set inside the init loop
     dac_initialized = False
     bt_connected = False
     vision_initialized = False
     mapping_initialized = False
+    beeper_initialized = False
     
     cruise_task = None
     follow_task = None
     mapping_task = None
-    bt_module = None
+    bt_module = None # Define bt_module in outer scope
 
     try:
-        # 1. Initialize DAC
-        if not wc.initialize_dac():
-            print("Exiting program: DAC initialization failed.")
-            return
-        dac_initialized = True
-    
-        # 2. Connect to Bluetooth (Lightweight I/O, before Kinect)
-        bt_module = BluetoothModule()
-        if not await bt_module.connect():
-            print("Exiting program: Bluetooth connection failed.")
-            return
-        bt_connected = True
-        await bt_module.start_listening(handle_incoming_data)
+        # --- NEW INITIALIZATION LOOP ---
+        all_systems_go = False
+        while not all_systems_go:
+            try:
+                # Reset flags for this attempt
+                dac_initialized = False
+                bt_connected = False
+                vision_initialized = False
+                mapping_initialized = False
+                beeper_initialized = False
 
-        # 3. Initialize Vision (Heavyweight I/O)
-        if not vision.initialize_detector():
-            print("Exiting program: Vision module initialization failed.")
-            return
-        vision_initialized = True
-        
-        # 4. Initialize Mapping (Depends on Vision module)
-        if not mapping.initialize():
-            print("Exiting program: Mapping module initialization failed.")
-            return
-        mapping_initialized = True
+                print("\n--- 🛰️ Attempting System Initialization ---")
+                
+                # 1. Initialize DAC
+                if not wc.initialize_dac():
+                    print(f"DAC initialization failed. Retrying in {RECONNECT_DELAY_S}s...")
+                    await asyncio.sleep(RECONNECT_DELAY_S)
+                    continue # Restart loop
+                dac_initialized = True
+                print("DAC Initialized ✅")
+                
+                # 1b. Initialize Beeper
+                if not beeper.initialize_beeper():
+                    print("Warning: Beeper initialization failed. Continuing without audio.")
+                else:
+                    beeper_initialized = True
+                print("Beeper Initialized ✅")
+            
+                # 2. Connect to Bluetooth
+                # Re-create the module each time to ensure a clean state
+                if bt_module and bt_module.client and bt_module.client.is_connected:
+                    await bt_module.disconnect() 
+                bt_module = BluetoothModule()
+                
+                if not await bt_module.connect():
+                    print(f"Bluetooth connection failed. Retrying in {RECONNECT_DELAY_S}s...")
+                    await asyncio.sleep(RECONNECT_DELAY_S)
+                    continue # Restart loop
+                bt_connected = True
+                print("Bluetooth Connected ✅")
+                await bt_module.start_listening(handle_incoming_data)
 
-        print("All systems initialized. Main loop started. Press Ctrl+C to exit.")
+                # 3. Initialize Vision
+                if not vision.initialize_detector():
+                    print(f"Vision module initialization failed. Retrying in {RECONNECT_DELAY_S}s...")
+                    # This module can fail if Kinect is unplugged, so cleanup
+                    if bt_connected:
+                        await bt_module.disconnect()
+                    await asyncio.sleep(RECONNECT_DELAY_S)
+                    continue # Restart loop
+                vision_initialized = True
+                print("Vision Module Initialized ✅")
+                
+                # 4. Initialize Mapping
+                if not mapping.initialize():
+                    print(f"Mapping module initialization failed. Retrying in {RECONNECT_DELAY_S}s...")
+                    # Cleanup previous steps before retry
+                    if bt_connected:
+                        await bt_module.disconnect()
+                    if vision_initialized:
+                        vision.shutdown_detector()
+                    await asyncio.sleep(RECONNECT_DELAY_S)
+                    continue # Restart loop
+                mapping_initialized = True
+                print("Mapping Module Initialized ✅")
+
+                # If all steps passed, set flag to exit loop
+                all_systems_go = True
+                print("\n--- All systems initialized. Main loop started. ---")
+
+            except asyncio.CancelledError:
+                print("\nInitialization cancelled.")
+                raise # Re-raise to be caught by outer try/except
+            except Exception as e:
+                print(f"Unexpected error during initialization: {e}. Retrying...")
+                # Clean up this attempt's partial inits before retrying
+                if bt_connected and bt_module:
+                    await bt_module.disconnect()
+                if vision_initialized:
+                    vision.shutdown_detector()
+                if mapping_initialized:
+                    mapping.shutdown()
+                if dac_initialized:
+                    wc.stop()
+                
+                # Reset flags
+                dac_initialized = False
+                bt_connected = False
+                vision_initialized = False
+                mapping_initialized = False
+                beeper_initialized = False
+
+                await asyncio.sleep(RECONNECT_DELAY_S)
+        # --- END OF INITIALIZATION LOOP ---
+
+        print("Creating autonomous tasks...")
         cruise_task = asyncio.create_task(cruise_control_loop())
         follow_task = asyncio.create_task(follow_person_loop())
         mapping_task = asyncio.create_task(mapping_loop())
 
-        # This 'while True' loop is correct for asyncio.run()
+        # Main operational loop
         while True:
             if not bt_module.client.is_connected:
                 print("\nBluetooth disconnected. Attempting to reconnect...")
@@ -286,6 +381,9 @@ async def main():
         # --- THIS BLOCK WILL NOW RUN ON CTRL+C ---
         print("\nCleaning up resources...")
         
+        # Set the event on cleanup just in case mapping is running
+        mapping_stop_event.set()
+        
         if cruise_task: cruise_task.cancel()
         if follow_task: follow_task.cancel()
         if mapping_task: mapping_task.cancel()
@@ -297,6 +395,7 @@ async def main():
             return_exceptions=True
         )
         
+        # Cleanup only if initialization was successful
         if bt_connected and bt_module:
             await bt_module.disconnect()
         if vision_initialized:
@@ -305,6 +404,8 @@ async def main():
             mapping.shutdown()
         if dac_initialized:
             wc.stop()
+        if beeper_initialized:
+            beeper.cleanup_beeper()
             
         print("Program cleaned up and exited.")
 

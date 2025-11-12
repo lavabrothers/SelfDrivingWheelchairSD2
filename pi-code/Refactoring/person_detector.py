@@ -33,8 +33,8 @@ KINECT_WIDTH = 512
 SMOOTHING_FACTOR = 0.9       
 PERSON_SMOOTHING_FACTOR = 0.7 
 CROP_BOTTOM_RATIO = 0.05     
-CROP_LEFT_RATIO = 0.35        
-CROP_RIGHT_RATIO = 0.35       
+CROP_LEFT_RATIO = 0.30        
+CROP_RIGHT_RATIO = 0.30       
 
 # --- Module-level Globals ---
 freenect2 = None
