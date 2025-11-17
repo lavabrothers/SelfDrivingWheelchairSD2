@@ -39,3 +39,12 @@ async def play_beep(times: int):
         except Exception as e:
             print(f"Error during beep: {e}")
             break # Stop beeping if there's an error
+
+async def play_long_beep():
+    """Plays a single, longer beep."""
+    try:
+        GPIO.output(BEEP_PIN, GPIO.HIGH)
+        await asyncio.sleep(BEEP_DURATION * 4)  # Make it 4x longer
+        GPIO.output(BEEP_PIN, GPIO.LOW)
+    except Exception as e:
+        print(f"Error during long beep: {e}")

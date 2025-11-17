@@ -2,28 +2,20 @@
 
 # File: kinect_audio.py
 # Module for initializing the Kinect V2 microphone and
-# running a background speech recognition thread.
+# providing an on-demand, blocking command listener.
 
 import time
 import speech_recognition as sr
-import threading
-
-# --- Module-level Globals ---
-listener_instance = None
-shutdown_flag = threading.Event()
 
 class KinectAudioListener:
     """
-    Handles background listening and keyword spotting 
+    Handles on-demand listening for specific commands
     using the Kinect's microphone array.
     """
     def __init__(self):
         self.recognizer = sr.Recognizer()
         self.microphone = None
         self.kinect_mic_index = None
-        self.stop_callback = None
-        self.stop_listening_function = None # This is a function returned by listen_in_background()
-        self.listener_thread = None
 
     def initialize_listener(self):
         """
@@ -35,7 +27,6 @@ class KinectAudioListener:
         print("Searching for Kinect microphone...")
         mic_names = sr.Microphone.list_microphone_names()
         for index, name in enumerate(mic_names):
-            # Your 'arecord -l' output showed "Sensor [Xbox NUI Sensor]"
             if "Sensor" in name or "Kinect" in name:
                 self.kinect_mic_index = index
                 print(f"Found Kinect mic at index {index} ('{name}').")
@@ -54,7 +45,6 @@ class KinectAudioListener:
         print("Adjusting for ambient noise... Please be quiet for 2 seconds.")
         try:
             with self.microphone as source:
-                # We use a 2-second duration to get a good sample.
                 self.recognizer.adjust_for_ambient_noise(source, duration=2.0)
             print("Audio initialized and calibrated. ✅")
             return True
@@ -62,88 +52,59 @@ class KinectAudioListener:
             print(f"Error during ambient noise adjustment: {e}")
             return False
 
-    def _background_listener_loop(self):
+    def listen_for_command(self, listen_duration=4):
         """
-        This is the core function that runs in its own thread.
-        It continuously listens and processes audio.
-        """
-        # NO 'with' statement. The listen_in_background function handles the stream.
-        self.stop_listening_function = self.recognizer.listen_in_background(
-            self.microphone, self._process_audio_callback,
-            phrase_time_limit=3.0 # Listen for up to 3 seconds of speech
-        )
-        print("Audio listener started in background...")
-        
-        # Keep this thread alive until the shutdown flag is set
-        shutdown_flag.wait()
-        
-        # Stop the background listener when shutting down
-        if self.stop_listening_function:
-            self.stop_listening_function(wait_for_stop=False)
-        print("Audio listener thread has stopped.")
-
-
-    def _process_audio_callback(self, recognizer, audio_data):
-        """
-        This function is called by listen_in_background() 
-        in a separate thread *every time* it hears speech.
-        """
-        # We use PocketSphinx for fast, offline recognition
-        # It's great for simple keywords like "stop"
-        try:
-            text = recognizer.recognize_sphinx(audio_data).lower()
-            
-            if text.strip(): # Check if text is not empty
-                print(f"Heard: '{text}' ", end='\r')
-
-            # --- This is the keyword logic ---
-            if "stop" in text:
-                print("\n*** 'STOP' command detected! ***")
-                if self.stop_callback:
-                    # Call the function that was passed in from the main script
-                    self.stop_callback()
-                    
-        except sr.UnknownValueError:
-            # This is normal, just means it couldn't understand the audio
-            pass 
-        except sr.RequestError as e:
-            print(f"PocketSphinx error: {e}")
-        except Exception as e:
-            print(f"Audio processing error: {e}")
-
-
-    def start_listening(self, callback_on_stop):
-        """
-        Starts the background listening thread.
-        
-        :param callback_on_stop: The function to call when 'stop' is heard.
+        Listens for a single command and returns a parsed string.
+        This is a BLOCKING function. Run it in a thread.
+        Returns: "follow", "cruise", "stop", or None
         """
         if not self.microphone:
-            print("Error: Must call initialize_listener() first.")
-            return False
-        
-        self.stop_callback = callback_on_stop
-        
-        # Clear the shutdown flag (in case it was set before)
-        shutdown_flag.clear()
-        
-        # Start the background listener in a new daemon thread
-        self.listener_thread = threading.Thread(
-            target=self._background_listener_loop,
-            daemon=True # Daemon thread will exit when main script exits
-        )
-        self.listener_thread.start()
-        return True
+            print("Error: Audio listener not initialized.")
+            return None
+
+        print(f"--- 🗣️  Listening for command... (max {listen_duration}s) ---")
+        try:
+            with self.microphone as source:
+                # Listen for audio from the microphone
+                audio_data = self.recognizer.listen(
+                    source, 
+                    timeout=listen_duration,      # Max time to wait for speech to start
+                    phrase_time_limit=3.0 # Max length of the speech
+                )
+            
+            # Recognize the audio using offline PocketSphinx
+            print("Processing audio...")
+            text = self.recognizer.recognize_sphinx(audio_data).lower()
+            print(f"Heard: '{text}'")
+            
+            # --- Parse for known commands ---
+            if "follow" in text:
+                return "follow"
+            if "cruise" in text:
+                return "cruise"
+            if "stop" in text:
+                return "stop"
+            
+            print("Command not recognized.")
+            return None
+            
+        except sr.WaitTimeoutError:
+            print("No speech detected within timeout.")
+            return None
+        except sr.UnknownValueError:
+            print("Sphinx could not understand audio.")
+            return None
+        except sr.RequestError as e:
+            print(f"PocketSphinx error: {e}")
+            return None
+        except Exception as e:
+            print(f"An unexpected error occurred in listen_for_command: {e}")
+            return None
 
     def shutdown_listener(self):
-        """
-Only to be used for testing, the thread is a daemon, but
-        this provides a clean way to stop it.
-        """
+        """Shuts down the audio listener."""
         print("\nShutting down audio listener...")
-        shutdown_flag.set() # Signal the thread to stop
-        if self.listener_thread:
-            self.listener_thread.join(timeout=2.0) # Wait for it to finish
+        # No specific hardware to close, PyAudio's 'with' block handles the stream.
         print("Audio listener shut down.")
 
 
@@ -151,24 +112,16 @@ Only to be used for testing, the thread is a daemon, but
 if __name__ == "__main__":
     print("Running kinect_audio.py in TEST MODE.")
     
-    def my_test_callback():
-        print("\n--- MAIN SCRIPT: STOP CALLBACK TRIGGERED! ---")
-        # In a real app, you might set a global flag here
-        
     listener = KinectAudioListener()
     
     if listener.initialize_listener():
-        listener.start_listening(my_test_callback)
+        print("\nTest: Please say a command (e.g., 'follow', 'cruise', 'stop').")
         
-        print("\nTest mode running. Say 'stop' to trigger the callback.")
-        print("The listener is running in the background.")
-        print("Press Ctrl+C to exit.")
+        command = listener.listen_for_command()
         
-        try:
-            # Keep the main thread alive
-            while True:
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            print("\nCtrl+C pressed. Shutting down.")
-        finally:
-            listener.shutdown_listener()
+        if command:
+            print(f"\n--- TEST: COMMAND RECOGNIZED: '{command}' ---")
+        else:
+            print("\n--- TEST: NO COMMAND RECOGNIZED ---")
+            
+    listener.shutdown_listener()

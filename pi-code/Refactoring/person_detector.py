@@ -11,7 +11,6 @@ import sys
 import threading # For lock
 
 # --- Imports for pylibfreenect2 ---
-# <--- MODIFIED: Removed 'LogLevel' which caused the import error ---
 from pylibfreenect2 import Freenect2, SyncMultiFrameListener, FrameType, FrameMap
 from pylibfreenect2 import Logger, setGlobalLogger 
 
@@ -30,7 +29,7 @@ MIN_PERSON_DISTANCE_FT = 0.5
 # --- Constants for get_nearest_object_angle() ---
 KINECT_H_FOV = 70.6          
 KINECT_WIDTH = 512           
-SMOOTHING_FACTOR = 0.9       
+SMOOTHING_FACTOR = 0.9       # <--- THIS IS NOW USED FOR BOTH
 PERSON_SMOOTHING_FACTOR = 0.7 
 CROP_BOTTOM_RATIO = 0.05     
 CROP_LEFT_RATIO = 0.30        
@@ -47,10 +46,13 @@ frame_count = 0
 kinect_lock = threading.Lock()
 
 # --- State for find_target_person() ---
-last_good_target_state = (None, None, DETECTION_WIDTH_PX)
+last_good_person_state = (None, None, DETECTION_WIDTH_PX)
 last_known_person_dist_ft = None
 consecutive_target_losses = 0 
-MAX_CONSECUTIVE_LOSSES = 5   
+MAX_CONSECUTIVE_LOSSES = 5
+# --- MODIFIED: State for obstacle smoothing ---
+last_known_obstacle_depth_mm = None
+# (Removed redundant OBSTACLE_SMOOTHING_FACTOR)
 
 # --- State for get_nearest_object_angle() ---
 last_known_depth = None
@@ -134,13 +136,16 @@ def shutdown_detector():
 
 def find_target_person(visualize=False):
     """
-    Grabs one frame, processes it, and finds the largest person.
+    Grabs one frame, finds the largest person, and the nearest obstacle
+    within the 'cruise control' cone.
+    Returns: (person_dist, person_center, frame_width, obstacle_dist), debug_frame
     """
-    global listener, frames, frame_count, net, last_good_target_state, last_known_person_dist_ft, consecutive_target_losses
+    global listener, frames, frame_count, net, last_good_person_state, last_known_person_dist_ft, consecutive_target_losses
+    global last_known_obstacle_depth_mm
 
     if not listener or not net:
         print("Error: Detector not initialized.")
-        return (None, None, DETECTION_WIDTH_PX), None
+        return (None, None, DETECTION_WIDTH_PX, None), None
 
     color_image_bgra_1080p = None
     depth_image_cpu = None
@@ -148,7 +153,9 @@ def find_target_person(visualize=False):
     with kinect_lock:
         if not listener.waitForNewFrame(frames, 10 * 1000): 
             print("Kinect timeout in find_target_person...", end='\r')
-            return last_good_target_state, None
+            p_state = last_good_person_state
+            # Return last known *smoothed* obstacle depth
+            return (p_state[0], p_state[1], p_state[2], last_known_obstacle_depth_mm), None
         
         color_frame = frames[FrameType.Color]
         depth_frame = frames[FrameType.Depth]
@@ -160,8 +167,14 @@ def find_target_person(visualize=False):
 
     frame_count += 1
     if frame_count % PROCESS_EVERY_NTH_FRAME != 0:
-        return last_good_target_state, None
+        p_state = last_good_person_state
+        # Return last known *smoothed* obstacle depth
+        return (p_state[0], p_state[1], p_state[2], last_known_obstacle_depth_mm), None
 
+    # Create a copy of the depth map for obstacle detection
+    obstacle_depth_map = depth_image_cpu.copy()
+
+    # --- Person Detection Logic ---
     color_image_bgr_1080p = cv2.cvtColor(color_image_bgra_1080p, cv2.COLOR_BGRA2BGR)
     frame_umat = cv2.UMat(color_image_bgr_1080p)
 
@@ -196,6 +209,7 @@ def find_target_person(visualize=False):
                 box = detections[0, 0, i, 3:7] * np.array([resized_w, resized_h, resized_w, resized_h])
                 best_target_box = box.astype("int")
 
+    # --- Person Found Logic ---
     if best_target_box is not None:
         (x_start, y_start, x_end, y_end) = best_target_box
         x, y, w, h = x_start, y_start, x_end - x_start, y_end - y_start
@@ -220,6 +234,10 @@ def find_target_person(visualize=False):
         if depth_roi_w > 0 and depth_roi_h > 0:
             person_roi = depth_image_cpu[depth_roi_y : depth_roi_y + depth_roi_h,
                                          depth_roi_x : depth_roi_x + depth_roi_w]
+            
+            # Mask out the person from the obstacle map
+            obstacle_depth_map[depth_roi_y : depth_roi_y + depth_roi_h,
+                               depth_roi_x : depth_roi_x + depth_roi_w] = 0
             
             valid_depths = person_roi[person_roi > 0]
             if valid_depths.size > 0:
@@ -248,17 +266,62 @@ def find_target_person(visualize=False):
 
         if current_dist_ft is not None and current_dist_ft > 1.0:
             consecutive_target_losses = 0 
-            last_good_target_state = (current_dist_ft, color_cX, resized_w)
-            return last_good_target_state, debug_frame
-
-    consecutive_target_losses += 1
-
-    if consecutive_target_losses < MAX_CONSECUTIVE_LOSSES:
-        return last_good_target_state, debug_frame
+            last_good_person_state = (current_dist_ft, color_cX, resized_w)
+        else:
+            consecutive_target_losses += 1
     else:
-        last_good_target_state = (None, None, resized_w)
+        # No person box found
+        consecutive_target_losses += 1
+
+    # --- MODIFIED: Obstacle Detection Logic with Smoothing ---
+    
+    # Apply the *same cropping* as cruise control
+    height, width = obstacle_depth_map.shape 
+    crop_row_bottom = int(height * (1.0 - CROP_BOTTOM_RATIO))
+    crop_col_left = int(width * CROP_LEFT_RATIO)
+    crop_col_right = int(width * (1.0 - CROP_RIGHT_RATIO))
+
+    # Create the cropped ROI for obstacle checking
+    obstacle_map_roi = obstacle_depth_map[0:crop_row_bottom, crop_col_left:crop_col_right]
+    
+    # Find the nearest obstacle *within the cropped ROI*
+    valid_obstacle_depths = obstacle_map_roi[obstacle_map_roi > 0]
+    
+    nearest_obstacle_depth_mm = None # Final value to be returned
+    
+    if valid_obstacle_depths.size > 0:
+        new_obstacle_depth = np.min(valid_obstacle_depths)
+        
+        # --- APPLY SMOOTHING using the *same* factor as cruise ---
+        if last_known_obstacle_depth_mm is None:
+            last_known_obstacle_depth_mm = new_obstacle_depth
+        else:
+            last_known_obstacle_depth_mm = \
+                (new_obstacle_depth * SMOOTHING_FACTOR) + \
+                (last_known_obstacle_depth_mm * (1.0 - SMOOTHING_FACTOR))
+        
+        nearest_obstacle_depth_mm = last_known_obstacle_depth_mm
+        
+    else:
+        # No obstacle found in cone
+        last_known_obstacle_depth_mm = None # Reset
+        nearest_obstacle_depth_mm = None
+    
+    if visualize and debug_frame is not None and nearest_obstacle_depth_mm is not None:
+        obs_text = f"Obstacle: {nearest_obstacle_depth_mm / 1000.0 :.2f}m"
+        cv2.putText(debug_frame, obs_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+    # --- Modified Return Logic ---
+    if consecutive_target_losses < MAX_CONSECUTIVE_LOSSES:
+        # We still have a "good" target, even if we just lost it
+        p_state = last_good_person_state
+        return (p_state[0], p_state[1], p_state[2], nearest_obstacle_depth_mm), debug_frame
+    else:
+        # Target is officially lost
+        last_good_person_state = (None, None, resized_w)
         last_known_person_dist_ft = None 
-        return last_good_target_state, debug_frame
+        return (None, None, resized_w, nearest_obstacle_depth_mm), debug_frame
+
 
 def get_nearest_object_angle(visualize=False):
     """
@@ -382,14 +445,15 @@ if __name__ == "__main__":
     
     try:
         while True:
-            (dist_ft, center_x, frame_w), debug_frame = find_target_person(visualize=True)
+            (dist_ft, center_x, frame_w, obs_depth), debug_frame = find_target_person(visualize=True)
             
             if debug_frame is None:
                 time.sleep(0.01) 
                 continue
 
             if dist_ft is not None:
-                print(f"Target Found: {dist_ft:.1f} ft away, at pixel {center_x} (Frame width: {frame_w}) ", end='\r')
+                obs_str = f"Obs: {obs_depth/1000.0:.2f}m" if obs_depth else "Obs: N/A"
+                print(f"Target: {dist_ft:.1f} ft | {obs_str} | @ pixel {center_x} (Frame: {frame_w}) ", end='\r')
             else:
                 print("Target Lost... searching...                                       ", end='\r')
                 

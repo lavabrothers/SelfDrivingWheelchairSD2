@@ -7,10 +7,12 @@
 import asyncio
 import time
 from enum import Enum
+import threading
 from bluetooth_module import BluetoothModule
 import wheelchair_control as wc
 import person_detector as vision
 import mapping_module as mapping
+import audio_feedback as beeper
 import cv2
 import numpy as np
 
@@ -23,12 +25,13 @@ CRUISE_STOP_DISTANCE_MM = 1500
 CRUISE_SPEED = 0.3
 
 # --- Follow Mode Constants ---
-FOLLOW_TARGET_DISTANCE_FT = 3.0
-FOLLOW_DEAD_ZONE_FT = 0.2
-FOLLOW_MOVE_SPEED = 0.3
-FOLLOW_TURN_SPEED = 0.4
+FOLLOW_TARGET_DISTANCE_FT = 3.5
+FOLLOW_DEAD_ZONE_FT = 0.3
+FOLLOW_MOVE_SPEED = 0.25
+FOLLOW_TURN_SPEED = 0.35
 FOLLOW_TRACKING_DEAD_ZONE_PX = 30
 FOLLOW_TARGET_LOST_TIMEOUT_S = 3.0
+FOLLOW_STOP_DISTANCE_MM = 1250  # <--- NEW: Stop 1m from obstacles
 MM_TO_FEET = 0.00328084
 
 # --- Reconnection Constants ---
@@ -44,6 +47,7 @@ class ControlState(Enum):
 
 current_state = ControlState.STOPPED
 last_command_time = time.time()
+mapping_stop_event = threading.Event() # <--- NEW: For interruptible mapping
 
 # --- State variables for follow mode ---
 last_person_detection_time = 0.0
@@ -58,7 +62,7 @@ def handle_incoming_data(data: bytes):
     """
     Parses incoming data and updates the control state.
     """
-    global current_state, last_command_time
+    global current_state, last_command_time, mapping_stop_event
     
     try:
         message = data.decode().strip()
@@ -73,11 +77,13 @@ def handle_incoming_data(data: bytes):
             print("Switching to CRUISE mode.")
             wc.stop() 
             current_state = ControlState.CRUISE
+            asyncio.create_task(beeper.play_beep(3))
     elif message == "Follow":
         if current_state != ControlState.FOLLOW:
             print("Switching to FOLLOW mode.")
             wc.stop() 
             current_state = ControlState.FOLLOW
+            asyncio.create_task(beeper.play_beep(4))
             global last_person_detection_time, last_person_turn_direction
             last_person_detection_time = 0.0
             last_person_turn_direction = 0.0
@@ -86,15 +92,24 @@ def handle_incoming_data(data: bytes):
             print("Switching to MAPPING mode.")
             wc.stop() 
             current_state = ControlState.MAPPING
+            asyncio.create_task(beeper.play_beep(5))
+            
     elif message == "STOP":
+        # <--- MODIFIED: Check if we are mapping and tell it to stop ---
+        if current_state == ControlState.MAPPING:
+            print("Requesting mapping task to stop...")
+            mapping_stop_event.set()  # Signal the thread to stop
+
         if current_state != ControlState.STOPPED:
-            print("Switching to STOPPED mode.")
+            print("SwitchING to STOPPED mode.")
             wc.stop() 
             current_state = ControlState.STOPPED
+            asyncio.create_task(beeper.play_beep(1))
     else:
         if current_state != ControlState.MANUAL:
             print("Switching to MANUAL mode.")
             current_state = ControlState.MANUAL
+            asyncio.create_task(beeper.play_beep(2))
         
         try:
             parts = [int(p) for p in message.split(',')]
@@ -143,9 +158,11 @@ async def follow_person_loop():
     while True:
         if current_state == ControlState.FOLLOW:
             
-            (dist_ft, center_x, frame_w), debug_frame = await asyncio.to_thread(vision.find_target_person, visualize=True)
+            # --- MODIFIED: Unpack 4 values ---
+            (dist_ft, center_x, frame_w, nearest_depth), debug_frame = await asyncio.to_thread(vision.find_target_person, visualize=True)
 
             if current_state != ControlState.FOLLOW:
+                wc.stop()
                 continue
 
             if debug_frame is None:
@@ -156,10 +173,12 @@ async def follow_person_loop():
             
             status_text = ""
             status_color = (0, 0, 255) # Red for lost
+            status_dist = "" # For debug print
 
             if dist_ft is not None:
                 last_person_detection_time = time.monotonic()
                 
+                # 1. --- Calculate speed based on person ---
                 fwd_bwd_speed = 0.0
                 if dist_ft > upper_bound_ft:
                     fwd_bwd_speed = FOLLOW_MOVE_SPEED
@@ -187,6 +206,16 @@ async def follow_person_loop():
                     status_turn = "CENTERED"
                 
                 last_person_turn_direction = left_right_speed
+                
+                # 2. --- NEW: Obstacle Override Check ---
+                if (fwd_bwd_speed > 0 and 
+                    nearest_depth is not None and 
+                    nearest_depth < FOLLOW_STOP_DISTANCE_MM):
+                    
+                    fwd_bwd_speed = 0.0 # Override: Stop forward motion
+                    status_dist = "OBSTACLE!" # Update status
+                
+                # 3. --- Set final movement ---
                 wc.set_movement(fwd_bwd_speed, left_right_speed)
                 
                 if DEBUG_PRINT: print(f"Follow: {dist_ft:.1f}ft ({status_dist}) | Turn: {status_turn} ✅ ", end='\r')
@@ -218,7 +247,7 @@ async def follow_person_loop():
 
 async def mapping_loop():
     """The main logic for mapping mode."""
-    global current_state, current_visual_frame 
+    global current_state, current_visual_frame, mapping_stop_event
     print("Mapping loop started.")
     
     mapping_screen = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -226,14 +255,34 @@ async def mapping_loop():
 
     while True:
         if current_state == ControlState.MAPPING:
+            
+            # <--- MODIFIED: Clear event and pass it ---
+            mapping_stop_event.clear()
+            
+            print("Temporarily shutting down vision module...")
+            vision.shutdown_detector()
+            
             print("Starting 360-degree mapping scan...")
             current_visual_frame = mapping_screen 
-            await asyncio.to_thread(mapping.perform_mapping)
-            print("Mapping scan complete. Switching to STOPPED mode.")
+            
+            await asyncio.to_thread(mapping.perform_mapping, mapping_stop_event)
+            
+            if mapping_stop_event.is_set():
+                print("Mapping scan was INTERRUPTED by user.")
+            else:
+                print("Mapping scan complete.")
+
+            print("Re-initializing vision module...")
+            if not vision.initialize_detector():
+                print("FATAL: Could not re-initialize vision. Stopping.")
+                asyncio.get_running_loop().stop()
+                break
+            
             current_state = ControlState.STOPPED
             wc.stop()
         
-        await asyncio.sleep(0.5 if current_state == ControlState.MAPPING else 0.5)
+        await asyncio.sleep(0.5)
+
 
 async def visual_flow_loop():
     """Displays the appropriate video feed based on the current state."""
@@ -253,21 +302,21 @@ async def visual_flow_loop():
     text_x = (640 - text_width) // 2
     cv2.putText(manual_screen, manual_text, (text_x, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-
     while True:
+        display_frame = None
         if current_state == ControlState.CRUISE or current_state == ControlState.FOLLOW:
-            cv2.imshow(window_name, current_visual_frame)
+            display_frame = current_visual_frame.copy()
         elif current_state == ControlState.MANUAL:
-            cv2.imshow(window_name, manual_screen)
+            display_frame = manual_screen.copy()
         elif current_state == ControlState.MAPPING:
-            cv2.imshow(window_name, current_visual_frame)
-        else:
-            cv2.imshow(window_name, stopped_screen)
+            display_frame = current_visual_frame.copy()
+        else: # STOPPED
+            display_frame = stopped_screen.copy()
+
+        cv2.imshow(window_name, display_frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("'q' pressed. Shutting down...")
-            # <--- CHANGED: Use get_running_loop() ---
-            # This tells the 'while loop.is_running()' in main() to stop
             asyncio.get_running_loop().stop()
             break
         
@@ -281,6 +330,7 @@ async def main():
     bt_connected = False
     vision_initialized = False
     mapping_initialized = False
+    beeper_initialized = False
     
     cruise_task = None
     follow_task = None
@@ -289,13 +339,17 @@ async def main():
     bt_module = None
 
     try:
-        # 1. Initialize DAC
         if not wc.initialize_dac():
             print("Exiting program: DAC initialization failed.")
             return
         dac_initialized = True
+
+        if not beeper.initialize_beeper():
+            print("Warning: Beeper initialization failed. Continuing without audio.")
+        else:
+            beeper_initialized = True
+            print("Beeper Initialized ✅")
     
-        # 2. Connect to Bluetooth (Lightweight I/O, before Kinect)
         bt_module = BluetoothModule()
         if not await bt_module.connect():
             print("Exiting program: Bluetooth connection failed.")
@@ -303,13 +357,11 @@ async def main():
         bt_connected = True
         await bt_module.start_listening(handle_incoming_data)
 
-        # 3. Initialize Vision (Heavyweight I/O)
         if not vision.initialize_detector():
             print("Exiting program: Vision module initialization failed.")
             return
         vision_initialized = True
         
-        # 4. Initialize Mapping (Depends on Vision module)
         if not mapping.initialize():
             print("Exiting program: Mapping module initialization failed.")
             return
@@ -322,12 +374,10 @@ async def main():
         mapping_task = asyncio.create_task(mapping_loop())
         visual_task = asyncio.create_task(visual_flow_loop())
 
-        # <--- CHANGED: Get the running loop ---
         loop = asyncio.get_running_loop() 
         while not loop.is_running():
              await asyncio.sleep(0.01)
              
-        # <--- This loop now exits cleanly on 'q' or Ctrl+C ---
         while loop.is_running():
             if not bt_module.client.is_connected:
                 print("\nBluetooth disconnected. Attempting to reconnect...")
@@ -363,18 +413,18 @@ async def main():
                  current_state = ControlState.STOPPED
                  wc.stop()
             
-            # This sleep is for the main safety loop.
-            # We need to handle the loop being stopped.
             try:
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
-                break # Exit loop if main is cancelled
+                break
             
     except asyncio.CancelledError:
         print("Main loop cancelled.")
     finally:
-        # --- THIS BLOCK WILL NOW RUN ON CTRL+C ---
         print("\nCleaning up resources...")
+        
+        # <--- MODIFIED: Set stop event and fix gather ---
+        mapping_stop_event.set()
         
         if cruise_task: cruise_task.cancel()
         if follow_task: follow_task.cancel()
@@ -382,10 +432,10 @@ async def main():
         if visual_task: visual_task.cancel()
         
         await asyncio.gather(
-            cruise_task if cruise_task else asyncio.sleep(0), 
-            follow_task if follow_task else asyncio.sleep(0), 
-            mapping_task if mapping_task else asyncio.sleep(0), 
-            visual_task if visual_task else asyncio.sleep(0),
+            cruise_task, 
+            follow_task, 
+            mapping_task, 
+            visual_task,
             return_exceptions=True
         )
         
@@ -397,11 +447,12 @@ async def main():
             mapping.shutdown()
         if dac_initialized:
             wc.stop()
+        if beeper_initialized:
+            beeper.cleanup_beeper()
             
         cv2.destroyAllWindows()
         print("Program cleaned up and exited.")
 
-# <--- CHANGED: Switched to asyncio.run() for robust Ctrl+C handling ---
 if __name__ == "__main__":
     try:
         asyncio.run(main())
