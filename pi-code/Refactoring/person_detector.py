@@ -35,6 +35,11 @@ CROP_BOTTOM_RATIO = 0.05
 CROP_LEFT_RATIO = 0.30        
 CROP_RIGHT_RATIO = 0.30       
 
+# --- NEW: Constants for get_center_path_depth() ---
+CENTER_PATH_Y_OFFSET_PX = 160   # How many pixels "down" from center to look
+CENTER_PATH_REGION_WIDTH = 200  # Width of the box
+CENTER_PATH_REGION_HEIGHT = 100 # Height of the box
+
 # --- Module-level Globals ---
 freenect2 = None
 kinect = None
@@ -58,6 +63,9 @@ last_known_obstacle_depth_mm = None
 last_known_depth = None
 last_known_angle = None
 last_known_coords = None
+
+# --- NEW: State for get_center_path_depth() ---
+last_known_center_depth = None
 
 # <--- This class is used to suppress Kinect [Info] logs ---
 class NoLogger(Logger):
@@ -400,6 +408,87 @@ def get_nearest_object_angle(visualize=False):
         print(f"Error in get_nearest_object_angle: {e}")
         return (last_known_depth, last_known_angle, last_known_coords), None
 
+# --- NEW: Function to check a small central region for obstacles ---
+def get_center_path_depth(visualize=False):
+    """
+    Gets the minimum depth from a small region in the center of the
+    depth frame to check the immediate path for obstacles.
+    This is more robust to peripheral IR noise than checking the whole frame.
+    
+    Returns:
+        (depth, (cx, cy)), frame: The depth in mm and center coordinate, and the
+                                   (optionally) visualized frame.
+    """
+    global listener, frames, last_known_center_depth, kinect_lock
+    
+    if listener is None:
+        print("Error: Detector not initialized.")
+        return (last_known_center_depth, None), None
+        
+    depth_map = None
+    debug_frame = None
+    
+    try:
+        with kinect_lock:
+            if not listener.waitForNewFrame(frames, 10 * 1000):
+                print("Kinect timeout in get_center_path_depth...", end='\r')
+                return (last_known_center_depth, None), None
+
+            depth_frame = frames[FrameType.Depth]
+            depth_map = depth_frame.asarray()
+            listener.release(frames)
+
+        h, w = depth_map.shape # 424, 512
+        
+        # --- 2. Define the Center Region ---
+        # As you suggested, we offset it down slightly.
+        center_x = w // 2
+        center_y = (h // 2) + CENTER_PATH_Y_OFFSET_PX
+        
+        # Calculate box coordinates
+        x1 = center_x - (CENTER_PATH_REGION_WIDTH // 2)
+        x2 = center_x + (CENTER_PATH_REGION_WIDTH // 2)
+        y1 = center_y - (CENTER_PATH_REGION_HEIGHT // 2)
+        y2 = center_y + (CENTER_PATH_REGION_HEIGHT // 2)
+        
+        # Clamp to frame boundaries
+        x1, x2 = max(0, x1), min(w, x2)
+        y1, y2 = max(0, y1), min(h, y2)
+
+        # --- 3. Get Depth from that Region ---
+        center_region = depth_map[y1:y2, x1:x2]
+        
+        # Get all valid (non-zero) depth readings
+        # Use percentile for noise rejection
+        valid_depths = center_region[center_region > 0] 
+
+        new_depth = None
+        if valid_depths.size > 0:
+            depth_candidate = np.percentile(valid_depths, 1)
+            # Check if reading is in valid range (0.5m to 4.5m)
+            if 500 < depth_candidate < 4500:
+                new_depth = depth_candidate
+
+        # --- 4. Apply Smoothing ---
+        if new_depth is None:
+            last_known_center_depth = None
+        else:
+            if last_known_center_depth is None:
+                last_known_center_depth = new_depth
+            else:
+                last_known_center_depth = (new_depth * SMOOTHING_FACTOR) + \
+                                          (last_known_center_depth * (1.0 - SMOOTHING_FACTOR))
+        
+        if visualize:
+            debug_frame = _build_center_path_visualization(depth_map, last_known_center_depth, (x1, y1, x2, y2))
+            
+        return (last_known_center_depth, (center_x, center_y)), debug_frame
+
+    except Exception as e:
+        print(f"Error in get_center_path_depth: {e}")
+        return (last_known_center_depth, None), None
+
+
 def _build_depth_visualization(depth_map, depth, angle, coords, crop_lines):
     """Helper function to generate the depth visualization frame."""
     try:
@@ -427,11 +516,36 @@ def _build_depth_visualization(depth_map, depth, angle, coords, crop_lines):
         print(f"Error building depth viz: {e}")
         return np.zeros((424, 512, 3), dtype=np.uint8)
 
+# --- NEW: Helper function to visualize the center path box ---
+def _build_center_path_visualization(depth_map, depth, box_coords):
+    """Helper function to generate the depth visualization for the center path."""
+    try:
+        x1, y1, x2, y2 = box_coords
+        
+        depth_viz = np.clip(depth_map, 500, 4500)
+        depth_viz = (depth_viz - 500) / 4000.0
+        depth_viz = (255 * (1.0 - depth_viz)).astype(np.uint8)
+        depth_viz[depth_map == 0] = 0
+        image_color = cv2.cvtColor(depth_viz, cv2.COLOR_GRAY2BGR)
+
+        color = (0, 255, 0) if depth is not None else (0, 0, 255)
+        cv2.rectangle(image_color, (x1, y1), (x2, y2), color, 2)
+
+        if depth is not None:
+            text = f"{depth/1000.0:.2f} m"
+            cv2.putText(image_color, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        return image_color
+    except Exception as e:
+        print(f"Error building center path viz: {e}")
+        return np.zeros((424, 512, 3), dtype=np.uint8)
+
 
 # --- Test Mode ---
 if __name__ == "__main__":
     print("Running person_detector.py in VISUAL TEST MODE (with MobileNet-SSD).")
     print("This will test the find_target_person() function.")
+    # To test get_center_path_depth, you would need to modify this test loop.
     
     if not initialize_detector():
         print("Failed to initialize detector. Exiting.")
@@ -445,7 +559,13 @@ if __name__ == "__main__":
     
     try:
         while True:
+            # --- Test find_target_person ---
             (dist_ft, center_x, frame_w, obs_depth), debug_frame = find_target_person(visualize=True)
+            
+            # --- OR Test get_center_path_depth ---
+            # (depth_mm, _), debug_frame = get_center_path_depth(visualize=True)
+            # obs_depth = None; dist_ft = None # Un-comment to test this one
+            
             
             if debug_frame is None:
                 time.sleep(0.01) 

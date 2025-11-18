@@ -15,10 +15,13 @@ import audio_feedback as beeper
 
 # --- Constants ---
 ADC_MAX = 4095.0
+DEBUG_PRINT = True # Set to True for new cruise/follow printouts
 
 # --- Cruise Mode Constants ---
 CRUISE_STOP_DISTANCE_MM = 1750
+CRUISE_STOP_DISTANCE_FT = 4.5  # NEW: For person detection
 CRUISE_SPEED = 0.3
+CRUISE_TURN_TRIM = 0.03  # NEW: For drift correction
 
 # --- Follow Mode Constants ---
 FOLLOW_TARGET_DISTANCE_FT = 3.5
@@ -58,16 +61,17 @@ def handle_incoming_data(message: str):
         return
         
     last_command_time = time.time()
-    wc.stop() 
-
+    
     if message == "Cruise":
         if current_state != ControlState.CRUISE:
             print("Switching to CRUISE mode.")
+            wc.stop() 
             current_state = ControlState.CRUISE
             asyncio.create_task(beeper.play_beep(3))
     elif message == "Follow":
         if current_state != ControlState.FOLLOW:
             print("Switching to FOLLOW mode.")
+            wc.stop() 
             current_state = ControlState.FOLLOW
             asyncio.create_task(beeper.play_beep(4))
             global last_person_detection_time, last_person_turn_direction
@@ -76,6 +80,7 @@ def handle_incoming_data(message: str):
     elif message == "MAP":
         if current_state != ControlState.MAP:
             print("Switching to MAP mode.")
+            wc.stop() 
             current_state = ControlState.MAP
             asyncio.create_task(beeper.play_beep(5))
             
@@ -87,6 +92,7 @@ def handle_incoming_data(message: str):
             
         if current_state != ControlState.STOPPED:
             print("Switching to STOPPED mode.")
+            wc.stop() 
             current_state = ControlState.STOPPED
             asyncio.create_task(beeper.play_beep(1))
     else:
@@ -107,21 +113,47 @@ def handle_incoming_data(message: str):
             print(f"Could not parse joystick data: {message}")
 
 async def cruise_control_loop():
-    """The main logic for cruise control mode."""
-    print("Cruise control loop started.")
+    """
+    The main logic for cruise control mode.
+    Uses a 2-stage check:
+    1. Check for any person (robust to IR).
+    2. Check for center-path obstacles (ignores peripheral IR noise).
+    """
+    print("Cruise control loop started (2-stage check).")
     while True:
         if current_state == ControlState.CRUISE:
-            (depth, angle, _), _ = await asyncio.to_thread(vision.get_nearest_object_angle, visualize=False)
+            
+            # --- CHECK 1: PERSON DETECTION (Robust to IR noise) ---
+            (dist_ft, _, _, _), _ = await asyncio.to_thread(vision.find_target_person, visualize=False)
+            
+            # --- CHECK 2: CENTER PATH OBSTACLE (Ignores peripheral IR noise) ---
+            (center_depth, _), _ = await asyncio.to_thread(vision.get_center_path_depth, visualize=False)
             
             if current_state != ControlState.CRUISE:
-                continue 
+                continue
+
+            # --- DECISION LOGIC ---
+            stop = False
+            stop_reason = ""
+
+            # Priority 1: Stop for any person
+            if dist_ft is not None and dist_ft < CRUISE_STOP_DISTANCE_FT:
+                stop = True
+                stop_reason = f"Person detected at {dist_ft:.2f}ft."
             
-            if depth is not None and depth < CRUISE_STOP_DISTANCE_MM:
+            # Priority 2: Stop for non-person obstacle in the center path
+            elif center_depth is not None and center_depth < CRUISE_STOP_DISTANCE_MM:
+                stop = True
+                stop_reason = f"Obstacle on path at {center_depth/1000.0:.2f}m."
+
+            # --- ACTION ---
+            if stop:
                 wc.stop()
-                print(f"Object detected at {depth/1000.0:.2f}m. Stopping.", end='\r')
+                if DEBUG_PRINT: print(f"{stop_reason} Stopping.", end='\r')
             else:
-                wc.set_movement(CRUISE_SPEED, 0.0)
-                print(f"Cruising forward. Nearest object > {CRUISE_STOP_DISTANCE_MM/1000.0:.1f}m", end='\r')
+                # No person and no center obstacle, so we can cruise.
+                wc.set_movement(CRUISE_SPEED, CRUISE_TURN_TRIM)
+                if DEBUG_PRINT: print(f"Cruising (Trim: {CRUISE_TURN_TRIM}). Path clear.", end='\r')
         
         await asyncio.sleep(0.1 if current_state == ControlState.CRUISE else 0.5)
 
@@ -136,8 +168,8 @@ async def follow_person_loop():
     while True:
         if current_state == ControlState.FOLLOW:
             
-            # Expect 4 values from vision module
-            (dist_ft, center_x, frame_w, nearest_depth), _ = await asyncio.to_thread(
+            # Expect 4 values, but we will ignore nearest_depth
+            (dist_ft, center_x, frame_w, _), _ = await asyncio.to_thread(
                 vision.find_target_person, 
                 visualize=False
             )
@@ -178,30 +210,23 @@ async def follow_person_loop():
                 
                 last_person_turn_direction = left_right_speed
                 
-                # 2. --- Obstacle Override Check ---
-                # If we are trying to move forward AND there is an obstacle
-                if (fwd_bwd_speed > 0 and 
-                    nearest_depth is not None and 
-                    nearest_depth < FOLLOW_STOP_DISTANCE_MM):
-                    
-                    fwd_bwd_speed = 0.0 # Override: Stop forward motion
-                    status_dist = "OBSTACLE!" # Update status
+                # 2. --- Obstacle Override Check (REMOVED) ---
                     
                 # 3. --- Set final movement ---
                 wc.set_movement(fwd_bwd_speed, left_right_speed)
-                print(f"Follow: {dist_ft:.1f}ft ({status_dist}) | Turn: {status_turn} ✅ ", end='\r')
+                if DEBUG_PRINT: print(f"Follow: {dist_ft:.1f}ft ({status_dist}) | Turn: {status_turn} ✅ ", end='\r')
 
             else:
                 # ... (rest of the target-lost logic is unchanged) ...
                 time_since_last_seen = time.monotonic() - last_person_detection_time
                 if last_person_detection_time == 0.0:
-                    print(f"Follow: SEARCHING... ❌                                 ", end='\r')
+                    if DEBUG_PRINT: print(f"Follow: SEARCHING... ❌                                 ", end='\r')
                 elif time_since_last_seen < FOLLOW_TARGET_LOST_TIMEOUT_S:
                     wc.set_movement(0.0, last_person_turn_direction)
-                    print(f"Follow: RE-ACQUIRING... ❓                              ", end='\r')
+                    if DEBUG_PRINT: print(f"Follow: RE-ACQUIRING... ❓                              ", end='\r')
                 else:
                     wc.stop()
-                    print(f"Follow: TARGET LOST. STOPPING. ❌                       ", end='\r')
+                    if DEBUG_PRINT: print(f"Follow: TARGET LOST. STOPPING. ❌                       ", end='\r')
         
         await asyncio.sleep(0.05 if current_state == ControlState.FOLLOW else 0.5) 
 
@@ -237,7 +262,7 @@ async def mapping_loop():
                 current_state = ControlState.STOPPED
                 print("Returning to STOPPED mode.")
         
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.0) # Sleep for 1s when not mapping
 
 
 async def terminal_input_loop():
@@ -275,38 +300,38 @@ async def main():
     input_task = None
     
     # --- Initialization ---
-    if not wc.initialize_dac():
-        print("Exiting program: DAC initialization failed.")
-        return
-    dac_initialized = True
-
-    if not beeper.initialize_beeper():
-        print("Warning: Beeper initialization failed. Continuing without audio.")
-    else:
-        beeper_initialized = True
-        print("Beeper Initialized ✅")
-    
-    if not vision.initialize_detector():
-        print("Exiting program: Vision module initialization failed.")
-        wc.stop()
-        return
-    vision_initialized = True
-    
-    if not mapping.initialize():
-        print("Exiting program: Mapping module initialization failed.")
-        vision.shutdown_detector()
-        wc.stop()
-        return
-    mapping_initialized = True
-
-    # --- Start Autonomous Tasks ---
-    print("Main loop started. Press Ctrl+C to exit.")
-    cruise_task = asyncio.create_task(cruise_control_loop())
-    follow_task = asyncio.create_task(follow_person_loop())
-    mapping_task = asyncio.create_task(mapping_loop())
-    input_task = asyncio.create_task(terminal_input_loop())
-
     try:
+        if not wc.initialize_dac():
+            print("Exiting program: DAC initialization failed.")
+            return
+        dac_initialized = True
+
+        if not beeper.initialize_beeper():
+            print("Warning: Beeper initialization failed. Continuing without audio.")
+        else:
+            beeper_initialized = True
+            print("Beeper Initialized ✅")
+        
+        if not vision.initialize_detector():
+            print("Exiting program: Vision module initialization failed.")
+            wc.stop()
+            return
+        vision_initialized = True
+        
+        if not mapping.initialize():
+            print("Exiting program: Mapping module initialization failed.")
+            vision.shutdown_detector()
+            wc.stop()
+            return
+        mapping_initialized = True
+
+        # --- Start Autonomous Tasks ---
+        print("Main loop started. Press Ctrl+C to exit.")
+        cruise_task = asyncio.create_task(cruise_control_loop())
+        follow_task = asyncio.create_task(follow_person_loop())
+        mapping_task = asyncio.create_task(mapping_loop())
+        input_task = asyncio.create_task(terminal_input_loop())
+
         while True:
             time_since_cmd = time.time() - last_command_time
             if current_state == ControlState.MANUAL and time_since_cmd > 1.0:

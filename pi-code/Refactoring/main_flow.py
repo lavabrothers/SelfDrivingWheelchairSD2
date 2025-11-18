@@ -20,6 +20,7 @@ DEBUG_PRINT = False
 
 # --- Cruise Mode Constants ---
 CRUISE_STOP_DISTANCE_MM = 1350
+CRUISE_STOP_DISTANCE_FT = 4.5  # NEW: (1350mm is ~4.43ft)
 CRUISE_SPEED = 0.3
 # NEW: Adjust this value to correct for drift (veering).
 # Based on follow_mode, negative values turn RIGHT, positive values turn LEFT.
@@ -33,7 +34,7 @@ FOLLOW_MOVE_SPEED = 0.25
 FOLLOW_TURN_SPEED = 0.35
 FOLLOW_TRACKING_DEAD_ZONE_PX = 30
 FOLLOW_TARGET_LOST_TIMEOUT_S = 3.0
-FOLLOW_STOP_DISTANCE_MM = 1250  # <--- NEW: Stop 1m from obstacles
+FOLLOW_STOP_DISTANCE_MM = 1250  
 MM_TO_FEET = 0.00328084
 
 # --- Reconnection Constants ---
@@ -121,23 +122,49 @@ def handle_incoming_data(data: bytes):
             print(f"Could not parse joystick data: {message}")
 
 async def cruise_control_loop():
-    """The main logic for cruise control mode."""
-    print("Cruise control loop started.")
+    """
+    The main logic for cruise control mode.
+    Uses a 2-stage check:
+    1. Check for any person (robust to IR).
+    2. Check for center-path obstacles (ignores peripheral IR noise).
+    """
+    print("Cruise control loop started (2-stage check).")
     while True:
         if current_state == ControlState.CRUISE:
             
-            (depth, angle, _), _ = await asyncio.to_thread(vision.get_nearest_object_angle, visualize=False)
+            # --- CHECK 1: PERSON DETECTION (Robust to IR noise) ---
+            # We run person detection. dist_ft will be None if no one is found.
+            (dist_ft, _, _, _), _ = await asyncio.to_thread(vision.find_target_person, visualize=False)
+            
+            # --- CHECK 2: CENTER PATH OBSTACLE (Ignores peripheral IR noise) ---
+            # This is your new function. It only looks at the depth in the center.
+            (center_depth, _), _ = await asyncio.to_thread(vision.get_center_path_depth, visualize=False)
             
             if current_state != ControlState.CRUISE:
                 continue
+
+            # --- DECISION LOGIC ---
+            stop = False
+            stop_reason = ""
+
+            # Priority 1: Stop for any person
+            if dist_ft is not None and dist_ft < CRUISE_STOP_DISTANCE_FT:
+                stop = True
+                stop_reason = f"Person detected at {dist_ft:.2f}ft."
             
-            if depth is not None and depth < CRUISE_STOP_DISTANCE_MM:
+            # Priority 2: Stop for non-person obstacle in the center path
+            elif center_depth is not None and center_depth < CRUISE_STOP_DISTANCE_MM:
+                stop = True
+                stop_reason = f"Obstacle on path at {center_depth/1000.0:.2f}m."
+
+            # --- ACTION ---
+            if stop:
                 wc.stop()
-                if DEBUG_PRINT: print(f"Object detected at {depth/1000.0:.2f}m. Stopping.")
+                if DEBUG_PRINT: print(f"{stop_reason} Stopping.")
             else:
-                # MODIFIED: Apply the turn trim to correct for drift
+                # No person and no center obstacle, so we can cruise.
                 wc.set_movement(CRUISE_SPEED, CRUISE_TURN_TRIM)
-                if DEBUG_PRINT: print(f"Cruising forward (Trim: {CRUISE_TURN_TRIM}). Nearest object > {CRUISE_STOP_DISTANCE_MM/1000.0:.1f}m", end='\r')
+                if DEBUG_PRINT: print(f"Cruising (Trim: {CRUISE_TURN_TRIM}). Path clear.", end='\r')
         
         await asyncio.sleep(0.1 if current_state == ControlState.CRUISE else 0.5)
 
@@ -152,7 +179,8 @@ async def follow_person_loop():
     while True:
         if current_state == ControlState.FOLLOW:
             
-            # --- MODIFIED: Unpack 4 values ---
+            # --- Unpack 4 values ---
+            # nearest_depth is the closest NON-PERSON obstacle
             (dist_ft, center_x, frame_w, nearest_depth), _ = await asyncio.to_thread(vision.find_target_person, visualize=False)
 
             if current_state != ControlState.FOLLOW:
@@ -161,6 +189,8 @@ async def follow_person_loop():
 
             if dist_ft is not None:
                 last_person_detection_time = time.monotonic()
+                
+                # --- OBSTACLE CHECK REMOVED ---
                 
                 # 1. --- Calculate speed based on person ---
                 fwd_bwd_speed = 0.0
