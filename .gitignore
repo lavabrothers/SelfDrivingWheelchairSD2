@@ -1,3 +1,4 @@
 .stfolder
 *.pyc
 *.pcd
+.vscode

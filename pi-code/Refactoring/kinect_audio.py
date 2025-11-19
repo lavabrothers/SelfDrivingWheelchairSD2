@@ -11,6 +11,10 @@ adjustment, and the blocking command listening process, making it suitable for
 integration into a multi-threaded or asynchronous application where voice control
 is desired.
 
+This is experimental and with a Kinect V2 mic, accuracy may vary based on environment
+and noise levels. However we don't use continuous listening to reduce CPU load and
+improve reliability. With more computational resources, continuous listening could be implemented.
+
 Dependencies:
 - speech_recognition: A library for performing speech recognition, with support
                       for various engines including PocketSphinx.

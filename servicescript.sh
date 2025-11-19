@@ -8,7 +8,8 @@
 
 # --- Configuration ---
 SERVICE_NAME="mainflow.service"
-SOURCE_FILE="./${SERVICE_NAME}"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+SOURCE_FILE="${SCRIPT_DIR}/${SERVICE_NAME}"
 DEST_PATH="/etc/systemd/system/${SERVICE_NAME}"
 
 # --- Sudo Check ---
