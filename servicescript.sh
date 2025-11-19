@@ -3,7 +3,7 @@
 # This script manages the mainflow systemd service.
 # It must be run with sudo privileges.
 #
-# Usage: sudo ./manage_service.sh [start|stop|restart|install]
+# Usage: sudo ./servicescript.sh [start|stop|restart|install]
 #
 
 # --- Configuration ---
@@ -68,10 +68,10 @@ case "$ACTION" in
       exit 1
     fi
 
-    # Copy the service file to the systemd directory
-    # Using 'cp' is safer than 'mv' so you keep your original file
+    # Copy the service file to the systemd directory after replacing the placeholder
     echo "Copying ${SOURCE_FILE} to ${DEST_PATH}..."
-    cp "$SOURCE_FILE" "$DEST_PATH"
+    # Replace _REPO_ROOT_ placeholder with the actual script directory
+    sed "s|_REPO_ROOT_|${SCRIPT_DIR}|g" "$SOURCE_FILE" | tee "$DEST_PATH" > /dev/null
 
     # Reload the systemd daemon to recognize the new service
     echo "Reloading systemd daemon..."
