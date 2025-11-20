@@ -64,7 +64,6 @@ PyAudio==0.2.14
 pycparser==2.22
 pyftdi==0.57.1
 Pygments==2.19.2
-pylibfreenect2 @ git+https://github.com/r9y9/pylibfreenect2.git@40221e815c182ee31e8da33df717ccdef1bc615f
 pynput==1.8.1
 pyopencl==2025.2.6
 pyparsing==3.2.4
