@@ -1,13 +1,12 @@
-# SmartStride: The Future of Mobility
-### Hands-Free, Affordable, and Intelligent
+# SmartStride
 
 ## Overview
 
-SmartStride is an affordable, hands-free mobility system designed to retrofit existing electric wheelchairs with autonomous capabilities. The system integrates a Raspberry Pi 5-based control unit that processes data from a magnetometer and an infrared depth sensor (Kinect V2) to enable real-time obstacle detection and navigation. The goal of this project is to improve the mobility and overall safety of users with limited body control through intelligent motion assistance, all while maintaining an affordable cost and an easy-to-implement modular design.
+SmartStride is an affordable, easy to use mobility system designed to retrofit existing electric wheelchairs with autonomous capabilities. The system integrates a Raspberry Pi 5-based control unit that processes data from a magnetometer and an infrared depth sensor (Kinect V2) to enable real-time obstacle detection and navigation. The goal of this project is to improve the mobility and overall safety of users with limited body control through intelligent motion assistance, all while maintaining an affordable cost and an easy-to-implement modular design. A good example is hospital settings moving patients around.
 
 ## Features
 
-The SmartStride system offers several modes of operation, controlled via a custom ESP32-based wireless controller:
+The system offers several modes of operation, controlled via a custom ESP32-based wireless controller:
 
 - **Mapping:** Utilizes the Kinect sensor's IR Flood Sensor to generate a 3D point cloud map of the surroundings by rotating the chair 360°.
 - **Autocruise:** The wheelchair cruises forward at a steady pace and stops promptly if an object obstructs its path. Once the path is clear, it continues cruising.
