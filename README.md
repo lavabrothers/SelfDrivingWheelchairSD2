@@ -80,7 +80,7 @@ Follow these steps to set up the software on the Raspberry Pi.
     ```bash
     cd pi-code
     ```
-    Create and activate a virtual environment:
+    Create and activate a virtual environment (Make sure its Python3.11 or Python3.12):
     ```bash
     python3 -m venv .venv
     source .venv/bin/activate
@@ -98,7 +98,7 @@ Follow these steps to set up the software on the Raspberry Pi.
     pip install git+https://github.com/r9y9/pylibfreenect2.git@40221e815c182ee31e8da33df717ccdef1bc615f
     ```
 
-    *Note: If the above command fails, you may need to check if you installed libfreenect2 correctly*
+    *Note: If the above command fails, you may need to check if you installed libfreenect2 correctly. Sometimes you*
 
 5.  **Install and Run the Service:**
     Navigate back to the root directory and use the `servicescript.sh` to install and start the main application as a systemd service. This will ensure it runs automatically on boot.
