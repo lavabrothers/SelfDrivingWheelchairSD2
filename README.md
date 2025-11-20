@@ -113,10 +113,10 @@ Follow these steps to set up the software on the Raspberry Pi.
 
 ## The Team
 
-- **Matthew Itskovich:** Computer Engineering - PCB Design and Hardware Integration.
-- **Evan Rees:** Computer Engineering - Software Design and System Architecture.
-- **Adam Lilly:** Electrical Engineering - Power Systems and Construction Consulting.
-- **Arturo Lara:** Computer Engineering - Embedded Systems and Programming.
+- **Matthew Itskovich:** Computer Engineering
+- **Evan Rees:** Computer Engineering
+- **Adam Lilly:** Electrical Engineering
+- **Arturo Lara:** Computer Engineering
 
 ## Acknowledgements
 
