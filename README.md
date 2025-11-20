@@ -24,7 +24,7 @@ The system is built around a Raspberry Pi 5 as the central processing unit, whic
 - **Depth Sensing & Vision:** Microsoft Kinect V2
 - **Wireless Control:** ESP32-based controller with joystick
 - **Orientation & Motion Tracking:** MPU-9250 (3-axis gyroscope, magnetometer, accelerometer)
-- **Digital-to-Analog Conversion:** MCP4728 DAC to interface with the wheelchair's motor controller.
+- **Digital-to-Analog Conversion:** MCP4728 DAC to interface with the wheelchair's joystick port.
 - **Power & Interfacing:** Five custom-designed PCBs for voltage regulation (12V, 5V, 3.3V), Bluetooth communication, and Pi-to-Wheelchair interfacing.
 
 ### Software
@@ -99,7 +99,7 @@ Follow these steps to set up the software on the Raspberry Pi.
     pip install git+https://github.com/r9y9/pylibfreenect2.git@40221e815c182ee31e8da33df717ccdef1bc615f
     ```
 
-    *Note: If the above command fails, you may need to manually remove the `pylibfreenect2` line from `requirements.txt` before running it again.*
+    *Note: If the above command fails, you may need to check if you installed libfreenect2 correctly*
 
 5.  **Install and Run the Service:**
     Navigate back to the root directory and use the `servicescript.sh` to install and start the main application as a systemd service. This will ensure it runs automatically on boot.
