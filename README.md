@@ -25,7 +25,7 @@ The system is built around a Raspberry Pi 5 as the central processing unit, whic
 - **Wireless Control:** ESP32-based controller with joystick
 - **Orientation & Motion Tracking:** MPU-9250 (3-axis gyroscope, magnetometer, accelerometer)
 - **Digital-to-Analog Conversion:** MCP4728 DAC to interface with the wheelchair's joystick port.
-- **Power & Interfacing:** Five custom-designed PCBs for voltage regulation (12V, 5V, 3.3V), Bluetooth communication, and Pi-to-Wheelchair interfacing.
+- **Power & Interfacing:** Four custom-designed PCBs for voltage regulation (12V, 5V, 3.3V) with comprehensive connectivity
 
 ### Software
 
