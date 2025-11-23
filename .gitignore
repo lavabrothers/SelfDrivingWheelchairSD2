@@ -1,6 +1,6 @@
 .stfolder
 *.pyc
-*.pcd
+#*.pcd
 .vscode
 pi-code/.vscode/
 pi-code/.venv/

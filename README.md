@@ -6,16 +6,16 @@
 
 ## Overview
 
-SmartStride is an affordable, easy to use mobility system designed to retrofit existing electric wheelchairs with autonomous capabilities. The system integrates a Raspberry Pi 5-based control unit that processes data from a magnetometer and an infrared depth sensor (Kinect V2) to enable real-time obstacle detection and navigation. The goal of this project is to improve the mobility and overall safety of users with limited body control through intelligent motion assistance, all while maintaining an affordable cost and an easy-to-implement modular design. We designed the system around the Kinect V2, an inexpensive sensor array that is quite powerful compared to other sensors of its weight class. A good example is hospital settings moving patients around.
+SmartStride is an affordable, easy to use mobility upgrade system designed to retrofit existing electric wheelchairs with autonomous capabilities. The system integrates a Raspberry Pi 5-based control unit that processes data from a IMU and an infrared depth sensor (Kinect V2) to enable real-time obstacle detection and navigation. The goal of this project is to improve the mobility and overall safety of users with limited body control through intelligent motion assistance, all while maintaining an affordable cost and an easy-to-implement modular design. We designed the system around the Kinect V2, an inexpensive sensor array that is quite powerful compared to other sensors of its weight class. A good example is hospital settings moving patients around.
 
 ## Features
 
 The system offers several modes of operation, controlled via a custom ESP32-based wireless controller:
 
-- **Mapping:** Utilizes the Kinect sensor's IR Flood Sensor to generate a 3D point cloud map of the surroundings by rotating the chair 360°.
-- **Autocruise:** The wheelchair cruises forward at a steady pace and stops promptly if an object obstructs its path. Once the path is clear, it continues cruising.
 - **Follow Person:** Using the Kinect's camera, the wheelchair will identify and follow the torso of an individual.
+- **Autocruise:** The wheelchair cruises forward at a steady pace and stops promptly if an object obstructs its path. Once the path is clear, it continues cruising.
 - **Manual Control:** Reverts to standard joystick operation, allowing the wheelchair to be driven manually, just as it was originally designed.
+- **Mapping:** Utilizes the Kinect sensor's IR Flood Sensor to generate a 3D point cloud map of the surroundings by rotating the chair 360°.
 
 ## System Architecture
 
@@ -28,7 +28,7 @@ The system is built around a Raspberry Pi 5 as the central processing unit, whic
 - **Wireless Control:** ESP32-based controller with joystick
 - **Orientation & Motion Tracking:** MPU-9250 (3-axis gyroscope, magnetometer, accelerometer)
 - **Digital-to-Analog Conversion:** MCP4728 DAC to interface with the wheelchair's joystick port.
-- **Power & Interfacing:** Four custom-designed PCBs for voltage regulation (12V, 5V, 3.3V) with comprehensive connectivity
+- **Power & Interfacing:** Four custom-designed PCBs for voltage regulation (12V, 5V, 3.3V) and comprehensive connectivity between all components via I2C
 
 ### Software
 
@@ -50,34 +50,7 @@ Follow these steps to set up the software on the Raspberry Pi.
     ```
 
 2.  **Install `libfreenect2` (Kinect Driver):**
-    The Kinect sensor requires the `libfreenect2` driver to be compiled and installed from source. This is a prerequisite for the Python library.
-    
-    First, install the build dependencies:
-    ```bash
-    sudo apt-get update
-    sudo apt-get install -y build-essential cmake pkg-config libusb-1.0-0-dev libturbojpeg0-dev libglfw3-dev
-    ```
-    
-    Next, clone the `libfreenect2` repository, build, and install it:
-    ```bash
-    git clone https://github.com/OpenKinect/libfreenect2.git
-    cd libfreenect2
-    mkdir build && cd build
-    cmake ..
-    make
-    sudo make install
-    ```
-    
-    Finally, set up the udev rules to allow access to the Kinect device.
-    ```bash
-    sudo cp ../platform/linux/udev/90-kinect2.rules /etc/udev/rules.d/
-    ```
-    After this, you should reboot the Raspberry Pi to ensure the new udev rules are loaded.
-    ```bash
-    cd ../.. # Return to the root of the SelfDrivingWheelchairSD2 directory
-    sudo reboot
-    ```
-    **Important:** After rebooting, you will need to navigate back into the `SelfDrivingWheelchairSD2` directory to continue the setup.
+    The Kinect sensor requires the `libfreenect2` driver. Please follow the official installation instructions at [https://github.com/OpenKinect/libfreenect2](https://github.com/OpenKinect/libfreenect2).
 
 3.  **Set Up the Python Environment:**
     Navigate to the `pi-code` directory to set up the Python environment.
@@ -102,7 +75,7 @@ Follow these steps to set up the software on the Raspberry Pi.
     pip install git+https://github.com/r9y9/pylibfreenect2.git@40221e815c182ee31e8da33df717ccdef1bc615f
     ```
 
-    *Note: If the above command fails, you may need to check if you installed libfreenect2 correctly. Sometimes you*
+    *Note: If the above command fails, you may need to check if you installed libfreenect2 correctly. Sometimes you need to make sure the proper enviroment varaibles are set for your enviroment*
 
 5.  **Install and Run the Service:**
     Navigate back to the root directory and use the `servicescript.sh` to install and start the main application as a systemd service. This will ensure it runs automatically on boot.
@@ -117,14 +90,11 @@ Follow these steps to set up the software on the Raspberry Pi.
 
 ## The Team
 
-- **Matthew Itskovich:** Computer Engineering
-- **Evan Rees:** Computer Engineering
-- **Adam Lilly:** Electrical Engineering
-- **Arturo Lara:** Computer Engineering
+- **Matthew Itskovich:** Computer Engineering: Designed the ESP32 Code and Controller hardware
+- **Evan Rees:** Computer Engineering: Designed Python Code and was Team Lead
+- **Adam Lilly:** Electrical Engineering: Designed and Manufactured Regulators
+- **Arturo Lara:** Computer Engineering: Admin Content and Soldering
 
-## Acknowledgements
-
-We would like to thank Dr. Chung Yong Chan and Dr. Arthur Weeks for their guidance and feedback throughout the SmartStride project. Their support and mentorship were invaluable in shaping the direction, design process, and successful completion of this project.
 
 ## Project Media
 
@@ -137,3 +107,14 @@ For more in-depth information, please refer to the following documents:
 
 - **[Senior Design Conference Paper](./Documentation/Senior%20Design%20Conference%20Paper.pdf)**
 - Additional written work on how this project works can be found in the `Documentation` folder.
+
+## Map Example
+
+**Demo Day Map:**
+![Demo Day Map](./Map Examples/DemoDayMap.png)
+
+## Acknowledgements
+
+We would like to thank Dr. Chung Yong Chan and Dr. Arthur Weeks for their guidance and feedback throughout the SmartStride project. Their support and mentorship were invaluable in shaping the direction, design process, and successful completion of this project.
+
+Thank you Dr.Wei for providing the wheelchair for use in this project.
