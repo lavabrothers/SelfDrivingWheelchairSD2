@@ -111,7 +111,7 @@ For more in-depth information, please refer to the following documents:
 ## Map Example
 
 **Demo Day Map:**
-![Demo Day Map](./Map Examples/DemoDayMap.png)
+![Demo Day Map](https://github.com/lavabrothers/SelfDrivingWheelchairSD2/blob/88daa3a8553c74b252f4243f2af78e0d579390b1/Map%20Examples/Apartment.png)
 
 ## Acknowledgements
 
